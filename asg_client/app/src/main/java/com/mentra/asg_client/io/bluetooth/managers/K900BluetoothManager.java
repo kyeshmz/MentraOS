@@ -1,12 +1,15 @@
 package com.mentra.asg_client.io.bluetooth.managers;
 
 import android.content.Context;
+import android.os.SystemClock;
 import android.util.Log;
 
+import com.mentra.asg_client.audio.I2sReadyGate;
 import com.mentra.asg_client.AsgConstants;
 import com.mentra.asg_client.io.bes.BesOtaStateStore;
 import com.mentra.asg_client.io.bes.BesOtaUartListener;
 import com.mentra.asg_client.io.bes.events.BesOtaProgressEvent;
+import com.mentra.asg_client.io.bes.log.BesLivenessMonitor;
 import com.mentra.asg_client.io.bluetooth.core.BaseBluetoothManager;
 import com.mentra.asg_client.io.bluetooth.interfaces.SerialListener;
 import com.mentra.asg_client.io.bluetooth.managers.mentralive.internal.BesMessageParser;
@@ -28,8 +31,11 @@ import com.mentra.asg_client.service.core.processors.ChunkedMessageProtocolStrat
 import com.mentra.asg_client.service.utils.SysProp;
 import com.mentra.asg_client.settings.AsgSettings;
 import com.mentra.asg_client.utils.WakeLockManager;
+import com.mentra.asg_client.io.bes.log.BesLivenessLog;
+import com.mentra.asg_client.io.bluetooth.managers.mentralive.internal.PhonePresenceReport;
 
 import org.greenrobot.eventbus.EventBus;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -59,6 +65,7 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
     private final String currentBootId;
     private volatile String liveBesOtaOwner = "";
     private volatile boolean framedPathProven;
+    private volatile long uartEvidenceInvalidatedAtElapsedMs = -1;
     private volatile BesOtaUartListener besOtaUartListener;
 
     public interface BesOtaAuthorizationCallback {
@@ -336,7 +343,7 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
 
         @Override
         public void invalidateLinkProof() {
-            framedPathProven = false;
+            invalidateFramedPathProof();
             linkState.streamDiscontinuity();
         }
 
@@ -472,6 +479,9 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
 
         // Send the data via the serial port
         boolean sent = comManager.write(data);
+        if (sent) {
+            BesLivenessMonitor.get().onOutboundWrite();
+        }
         Log.d(
                 TAG,
                 "📡 "
@@ -744,7 +754,12 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
      */
     public void addPhoneWireCapsIfSupported(JSONObject response) {
         LinkStateMachine.BesCaps besCaps = linkState.getNegotiatedCaps();
-        if (response == null || (!besCaps.k900Le && !besCaps.binary && !besCaps.filePayloadV2)) {
+        if (response == null
+                || (!besCaps.k900Le
+                        && !besCaps.binary
+                        && !besCaps.filePayloadV2
+                        && !besCaps.micTuning
+                        && !besCaps.wearTuning)) {
             return;
         }
         try {
@@ -761,6 +776,12 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
                 caps.put("file_payload_gatt_max", BesWireFormat.FILE_PACK_SIZE_GATT_MAX);
                 caps.put("file_payload_coc_max", BesWireFormat.FILE_PACK_SIZE_COC_MAX);
             }
+            if (besCaps.micTuning) {
+                caps.put("mic_tuning", true);
+            }
+            if (besCaps.wearTuning) {
+                caps.put("wear_tuning", true);
+            }
             response.put("wire_caps", caps);
         } catch (Exception e) {
             Log.w(TAG, "Failed to attach phone wire capabilities", e);
@@ -770,6 +791,11 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
     /** Whether the BES has proven binary relay support (wire_caps advert or an observed frame). */
     public boolean isBesBinaryRelaySupported() {
         return linkState.getNegotiatedCaps().binary;
+    }
+
+    /** Request a fresh BES status; returns false while another UART operation owns the lane. */
+    public boolean requestSystemVersionRefresh() {
+        return transportCoordinator.requestSystemVersionRefresh();
     }
 
     /**
@@ -1177,6 +1203,18 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
         return framedPathProven;
     }
 
+    /** Evidence received before a UART reset/recovery cannot authorize the current link. */
+    public boolean isCurrentUartEvidence(long receivedAtElapsedMs) {
+        return framedPathProven && isConnected() && transportCoordinator.isReadyForNormalUse()
+                && receivedAtElapsedMs > uartEvidenceInvalidatedAtElapsedMs;
+    }
+
+    private void invalidateFramedPathProof() {
+        uartEvidenceInvalidatedAtElapsedMs = SystemClock.elapsedRealtime();
+        framedPathProven = false;
+        I2sReadyGate.invalidateLink();
+    }
+
     private BesUartTransportCoordinator.SafetyPolicy currentBesOtaSafetyPolicy() {
         BesOtaStateStore.UartPolicy policy =
                 besOtaStateStore.uartPolicy(currentBootId, framedPathProven, liveBesOtaOwner);
@@ -1379,6 +1417,8 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
                                 // both mutations atomic with the baud-state transition.
                                 applyPhonePresenceFromSyvr(bData);
                                 linkState.capsAdvertised(applyBesWireCaps(json));
+                                JSONObject caps = json.optJSONObject("wire_caps");
+                                I2sReadyGate.setSupported(caps != null && caps.optInt("i2s_ready", 0) == 1);
                             });
             if (result == BesUartTransportCoordinator.SystemVersionResult.IGNORED) {
                 Log.i(TAG, "Ignoring sr_syvr from a retired UART session");
@@ -1435,6 +1475,15 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
      * baud), and upgrade the UART link to little-endian K900 STRING lengths when the firmware
      * advertises it. {@code wire_caps} may sit at the top level or inside the {@code B} body.
      */
+    /**
+     * Read a wire_caps flag that the BES may encode either as a JSON boolean or as a 0/1 number.
+     * {@code optBoolean} ignores numbers and {@code optInt} ignores booleans, so a single-typed
+     * read silently drops half the advertisements.
+     */
+    private static boolean wireCapFlagOn(JSONObject caps, String name) {
+        return caps.optBoolean(name, false) || caps.optInt(name, 0) != 0;
+    }
+
     private LinkStateMachine.BesCaps applyBesWireCaps(JSONObject json) {
         if (json == null) {
             return null;
@@ -1466,7 +1515,9 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
                             // Big-pack support ships with the file_payload_v2 advertisement.
                             filePayloadV2,
                             caps.optInt("proto", BesWireFormat.PROTOCOL_VERSION_V2),
-                            caps.optInt("notify_cap", 0));
+                            caps.optInt("notify_cap", 0),
+                            wireCapFlagOn(caps, "mic_tuning"),
+                            wireCapFlagOn(caps, "wear_tuning"));
         }
         if (advertised != null && advertised.k900Le) {
             if (uartToBesEndian != K900LengthCodec.Endian.LE) {
@@ -1559,6 +1610,24 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
         }
     }
 
+    private void applyPhonePresence(JSONObject body, String key, String source) {
+        Boolean present = PhonePresenceReport.parse(body.opt(key));
+        if (present == null) {
+            Log.w(TAG, "Ignoring malformed phone presence from " + source);
+            return;
+        }
+        if (linkState.getPhonePresence() != (present
+                ? LinkStateMachine.PhonePresence.PRESENT : LinkStateMachine.PhonePresence.ABSENT)) {
+            try {
+                BesLivenessLog.info("phone_presence",
+                        new JSONObject().put("source", source).put("present", present));
+            } catch (JSONException ignored) {
+                // Diagnostics must not prevent applying an authoritative report.
+            }
+        }
+        linkState.phonePresenceReported(present);
+    }
+
     /**
      * Sync phone BLE presence from the {@code phone_ble} field the BES adds to its sr_syvr reply
      * body (firmware >= 17.26.7.23). This is the boot/wake/recovery sync for the initial value;
@@ -1569,7 +1638,7 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
         if (bData == null || !bData.has("phone_ble")) {
             return;
         }
-        linkState.phonePresenceReported(bData.optInt("phone_ble", 0) == 1);
+        applyPhonePresence(bData, "phone_ble", "sr_syvr");
     }
 
     /**
@@ -1601,14 +1670,9 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
                 return true; // Still consumed: a malformed edge must not reach CommandProcessor.
             }
 
-            boolean present = bData.optInt("on", 0) == 1;
-            Log.i(
-                    TAG,
-                    "📱 BES reported phone BLE "
-                            + (present ? "connected" : "disconnected")
-                            + " (sr_phble)");
+            JSONObject body = bData;
             transportCoordinator.runForCurrentSerialSession(
-                    receiveSession, () -> linkState.phonePresenceReported(present));
+                    receiveSession, () -> applyPhonePresence(body, "on", "sr_phble"));
             return true;
         } catch (Exception e) {
             Log.e(TAG, "💥 Error parsing sr_phble", e);
@@ -1642,6 +1706,9 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
     }
 
     private void reconcileBesOtaVersionProof(String actualVersion) {
+        // This callback runs only for the current UART session. Phone clock sync must
+        // not change the freshness of a hardware reply, including time spent reading state.
+        long receivedAtElapsedMs = SystemClock.elapsedRealtime();
         String canonicalActualVersion = BesOtaStateStore.canonicalVersion(actualVersion);
         String diagnosticActualVersion =
                 canonicalActualVersion == null ? "invalid" : canonicalActualVersion;
@@ -1664,6 +1731,8 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
                         + diagnosticActualVersion
                         + " current_boot="
                         + currentBootId
+                        + " elapsed_realtime_ms="
+                        + receivedAtElapsedMs
                         + " disposition="
                         + (skipReason == null ? "candidate" : "ignored")
                         + (skipReason == null ? "" : " reason=" + skipReason)
@@ -1905,7 +1974,7 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
 
         // Close transport state before releasing the file lease so cleanup cannot resume a
         // deferred baud transition on a port that is already going down.
-        framedPathProven = false;
+        invalidateFramedPathProof();
         linkState.serialClosed();
         transportCoordinator.onSerialClosed();
         if (currentFileTransfer != null && currentFileTransfer.isActive) {
@@ -2011,6 +2080,7 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
                         break;
                     }
                     BleTraceLogger.logK900Frame("bes_to_asg", "asg_uart_input", message);
+                    BesLivenessMonitor.get().onInboundFrame();
 
                     // Check for file transfer acknowledgments first
                     processReceivedMessage(message);
@@ -2063,6 +2133,7 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
                             // CommandProcessor initialization
                             if (!handleSrSyvrResponse(payload, receiveSession)
                                     && !handleSrBaudResponse(payload, receiveSession)
+                                    && !handleI2sReadyResponse(payload, receiveSession)
                                     && !handleSrPhbleResponse(payload, receiveSession)
                                     && !handleFileTransportResponse(payload)) {
                                 // Not a BES-owned sr_* response, forward to listeners
@@ -2091,6 +2162,21 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
         boolean accepted;
         List<byte[]> messages;
         long discardedBytes;
+    }
+
+    private boolean handleI2sReadyResponse(byte[] payload, SerialSession receiveSession) {
+        try {
+            JSONObject message = new JSONObject(new String(payload, java.nio.charset.StandardCharsets.UTF_8));
+            if (!"hm_i2sready".equals(message.optString("C"))) return false;
+            if (!transportCoordinator.isCurrentSerialSession(receiveSession)) return true;
+            Object rawBody = message.opt("B");
+            JSONObject body = rawBody instanceof JSONObject ? (JSONObject) rawBody
+                    : new JSONObject(String.valueOf(rawBody));
+            I2sReadyGate.onResponse(body.optInt("request_id", 0), body.optBoolean("ready", false));
+            return true;
+        } catch (org.json.JSONException e) {
+            return false;
+        }
     }
 
     private void onValidUartFrame(SerialSession receiveSession) {
@@ -2128,7 +2214,7 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
 
         // A proof belongs to one exact SerialSession. Never let an sr_syvr from the
         // previous file descriptor authorize traffic on a newly adopted session.
-        framedPathProven = false;
+        invalidateFramedPathProof();
         linkState.serialReady();
         transportCoordinator.onSerialReady(session);
         Log.d(TAG, "🔌 ✅ Serial port marked as open");
@@ -2164,7 +2250,7 @@ public class K900BluetoothManager extends BaseBluetoothManager implements Serial
         if (bSucc) {
             linkState.serialReady();
         } else {
-            framedPathProven = false;
+            invalidateFramedPathProof();
             linkState.serialClosed();
             transportCoordinator.onSerialClosed();
         }
