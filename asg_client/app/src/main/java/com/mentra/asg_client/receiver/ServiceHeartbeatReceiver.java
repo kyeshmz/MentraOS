@@ -4,7 +4,6 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.util.Log;
-import com.mentra.asg_client.RecoveryWorkerManager;
 import com.mentra.asg_client.io.ota.helpers.OtaHelper;
 import com.mentra.asg_client.io.ota.utils.OtaConstants;
 import com.mentra.asg_client.service.core.AsgClientService;
@@ -56,7 +55,8 @@ public class ServiceHeartbeatReceiver extends BroadcastReceiver {
             lastHeartbeatTime = currentTime;
 
             try {
-                Intent pongIntent = RecoveryWorkerManager.newRecoveryIntent(ACTION_PONG);
+                Intent pongIntent = new Intent(ACTION_PONG);
+                pongIntent.setPackage("com.mentra.recovery");
                 context.sendBroadcast(pongIntent, RECOVERY_HEARTBEAT_PERMISSION);
                 Log.d(TAG, "Sent heartbeat acknowledgment");
             } catch (Exception e) {

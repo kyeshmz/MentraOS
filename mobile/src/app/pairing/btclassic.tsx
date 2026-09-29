@@ -1,7 +1,6 @@
 import {useRoute} from "@react-navigation/native"
-import {useEffect, useMemo, useRef} from "react"
-import {Button, Header, Screen} from "@/components/ignite"
-import {MentraLogoStandalone} from "@/components/brands/MentraLogoStandalone"
+import {useEffect, useMemo} from "react"
+import {Button, Screen} from "@/components/ignite"
 import {OnboardingGuide, OnboardingStep} from "@/components/onboarding/OnboardingGuide"
 import {useEngineSnapshot} from "@/hooks/useEngineSnapshot"
 import {translate} from "@/i18n"
@@ -9,7 +8,7 @@ import {focusEffectPreventBack, usePushPrevious} from "@/contexts/NavigationHist
 import {engine} from "@mentra/engine"
 import type {Device} from "@mentra/bluetooth-sdk"
 import {SETTINGS, useSetting} from "@mentra/engine"
-import {cancelPendingPairing, routePairingKickoffFailure} from "@/utils/PairingUtils"
+import {routePairingKickoffFailure} from "@/utils/PairingUtils"
 import {SettingsNavigationUtils} from "@/utils/SettingsNavigationUtils"
 import {View} from "react-native"
 import {useAppTheme} from "@/contexts/ThemeContext"
@@ -46,12 +45,10 @@ export default function BtClassicPairingScreen() {
   const [savedDeviceName] = useSetting(SETTINGS.device_name.key)
   const deviceName = device?.name || savedDeviceName || ""
   const {theme} = useAppTheme()
-  const cancellingPairing = useRef(false)
 
   focusEffectPreventBack()
 
   const handleSuccess = () => {
-    if (cancellingPairing.current) return
     if (device) {
       // The loading screen owns the selected-device connect. Revealing it first
       // keeps one cancellable kickoff path for Android, iOS, and controllers.
@@ -73,14 +70,6 @@ export default function BtClassicPairingScreen() {
 
   const handleBack = () => {
     goBack()
-  }
-
-  const handleCancelPairing = async () => {
-    if (cancellingPairing.current) return
-    cancellingPairing.current = true
-    if (!(await cancelPendingPairing())) {
-      cancellingPairing.current = false
-    }
   }
 
   const handleOpenSettings = async () => {
@@ -148,26 +137,18 @@ export default function BtClassicPairingScreen() {
 
   return (
     <Screen preset="fixed" safeAreaEdges={["bottom"]} extraAndroidInsets>
-      {device && (
-        <Header
-          leftIcon="chevron-left"
-          leftIconAccessibilityLabel={translate("pairing:cancelPairing")}
-          onLeftPress={handleCancelPairing}
-          RightActionComponent={<MentraLogoStandalone />}
-        />
-      )}
+      {/* <Header leftIcon="chevron-left" onLeftPress={handleBack} /> */}
       <OnboardingGuide
         steps={steps}
         autoStart={true}
         showCloseButton={false}
-        showHeader={!device}
         endButtonText={translate("onboarding:openSettings")}
         endButtonFn={handleOpenSettings}
         showSkipButton={false}
       />
 
       {otherBtConnected && (
-        <View className={device ? "mt-2 w-full" : "absolute bottom-16 w-full"}>
+        <View className="absolute bottom-16 w-full">
           <Button
             text={translate("onboarding:showDevicePicker")}
             preset="secondary"

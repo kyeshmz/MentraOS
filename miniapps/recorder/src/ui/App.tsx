@@ -1,6 +1,6 @@
-import {useEffect, useMemo, useRef, useState} from "react"
+import {useEffect, useMemo, useState} from "react"
 import {AudioWaveform, Mic, Search, Trash2} from "lucide-react"
-import {useColorScheme, useHistoryState, useSafeArea} from "@mentra/miniapp/ui"
+import {useColorScheme, useSafeArea} from "@mentra/miniapp/ui"
 
 import type {RecordingItem} from "../shared/types"
 import {Header} from "./components/Header"
@@ -18,18 +18,10 @@ export function App() {
   const scheme = useColorScheme()
   const {insets} = useSafeArea()
   const rec = useRecorder()
-  const [screen, setScreen] = useHistoryState<"list" | "audio" | "transcript">("screen", "list")
-  const previousRecording = useRef<string | null>(null)
-  const recordingId = rec.status?.recordingId ?? null
-  useEffect(() => {
-    if (recordingId === previousRecording.current) return
-    previousRecording.current = recordingId
-    setScreen(recordingId ? "audio" : "list")
-  }, [recordingId, setScreen])
   const [query, setQuery] = useState("")
   // Deletion is permanent, so a tap on a row's trash opens an explicit confirm
   // dialog rather than deleting in place.
-  const [pendingDelete, setPendingDelete] = useHistoryState<RecordingItem | null>("deleteRecording", null)
+  const [pendingDelete, setPendingDelete] = useState<RecordingItem | null>(null)
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", scheme === "dark")
@@ -61,12 +53,10 @@ export function App() {
   }
 
   // While capturing, take over the whole screen.
-  if (rec.isRecording && rec.status && screen !== "list") {
+  if (rec.isRecording && rec.status) {
     return (
       <div className="w-screen h-screen flex flex-col overflow-hidden" style={frame}>
         <RecordingScreen
-          view={screen}
-          onViewChange={setScreen}
           status={rec.status}
           levels={rec.levels}
           transcript={rec.transcript}
@@ -152,9 +142,9 @@ export function App() {
         style={{paddingBottom: insets.bottom + 24}}>
         <button
           type="button"
-          aria-label={rec.isRecording ? "Return to recording" : "Start recording"}
-          onClick={() => (rec.isRecording ? setScreen("audio") : rec.startRecording())}
-          disabled={!rec.hasMic && !rec.isRecording}
+          aria-label="Start recording"
+          onClick={rec.startRecording}
+          disabled={!rec.hasMic}
           className="pointer-events-auto grid place-items-center rounded-full text-white active:scale-95 transition-transform disabled:opacity-40"
           style={{
             width: 66,

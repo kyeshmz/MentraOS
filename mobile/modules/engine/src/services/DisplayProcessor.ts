@@ -19,7 +19,6 @@ import {
   G2_PROFILE,
   Z100_PROFILE,
   NEX_PROFILE,
-  NIMO_PROFILE,
   TextMeasurer,
   TextWrapper,
   ColumnComposer,
@@ -31,7 +30,6 @@ import {
 import {ISLAND_SETTINGS_KEYS} from "../runtime/config"
 import {useGlassesStore} from "../stores/glasses"
 import {useSettingsStore} from "../stores/settings"
-import {isNimoModelName} from "../types/hardware"
 import {isGlassesConnected} from "./GlassesReadiness"
 
 // =============================================================================
@@ -41,7 +39,7 @@ import {isGlassesConnected} from "./GlassesReadiness"
 /**
  * Supported device models for display processing
  */
-export type DeviceModel = "g1" | "g2" | "z100" | "nex" | "nimo" | "mach1" | "mentra-live" | "simulated" | "unknown"
+export type DeviceModel = "g1" | "g2" | "z100" | "nex" | "mach1" | "mentra-live" | "simulated" | "unknown"
 
 /**
  * Display event types that we process
@@ -55,7 +53,7 @@ export type DisplayLayoutType =
   | "bitmap_view"
 
 /**
- * Raw local display event before device-specific processing
+ * Raw display event from the cloud/WebSocket
  */
 export interface DisplayEvent {
   view: "main" | "dashboard"
@@ -211,7 +209,6 @@ const DEVICE_PROFILES: Record<DeviceModel, DisplayProfile> = {
   "g2": G2_PROFILE,
   "z100": Z100_PROFILE,
   "nex": NEX_PROFILE,
-  "nimo": NIMO_PROFILE,
   "mach1": Z100_PROFILE, // Mach1 uses same hardware as Vuzix Z100
   "mentra-live": G1_PROFILE, // Mentra Live has no display, uses G1 as fallback
   "simulated": G1_PROFILE, // Simulated uses G1 profile
@@ -226,9 +223,6 @@ function normalizeModelName(modelName: string | null | undefined): DeviceModel {
 
   const lower = modelName.toLowerCase()
 
-  if (isNimoModelName(modelName)) {
-    return "nimo"
-  }
   if (lower.includes("g2") || lower.includes("even realities g2")) {
     return "g2"
   }

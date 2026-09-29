@@ -18,7 +18,7 @@ export interface CapsuleRegistration {
   iconUrlOverride?: string
   /** Routes on which the visible capsule button should render. Empty/undefined = always visible while registered. */
   visibleOnRoutes?: string[]
-  /** Close and stop the miniapp without capturing a switcher preview. */
+  /** Called when the user taps the close button. Captures screenshot + navigates back. */
   handleRightPress: (shouldGoBack?: boolean) => Promise<void> | void
   handleLeftPress: (shouldGoBack?: boolean) => Promise<void> | void
   offsetTop?: number
@@ -43,9 +43,6 @@ interface UseRegisterCapsuleArgs {
   visibleOnRoutes?: string[]
   /** Override the default screenshot+goBack behavior on Android back press. */
   onBackPress?: () => void
-  /** Overlay hosts coordinate closing with their own exit animation. */
-  onClosePress?: () => void
-  onMinimizePress?: () => void
   offsetTop?: number
   offsetRight?: number
 }
@@ -67,8 +64,6 @@ export function useRegisterCapsule({
   offsetTop,
   offsetRight,
   onBackPress,
-  onClosePress,
-  onMinimizePress,
 }: UseRegisterCapsuleArgs) {
   const insets = useSaferAreaInsets()
   const {goBack} = useNavigationStore.getState()
@@ -78,27 +73,21 @@ export function useRegisterCapsule({
   insetsTopRef.current = insets.top
 
   const handleRightPress = useCallback(
-    (shouldGoBack?: boolean) => {
-      if (onClosePress) {
-        onClosePress()
-        return
-      }
+    async (shouldGoBack?: boolean) => {
       console.log(`CAPSULE MENU: handleRightPress() called ${shouldGoBack}`)
+      await captureScreenshot(viewShotRef, packageName, insetsTopRef.current, {settle: true})
       if (shouldGoBack) {
         goBack()
       }
       engine.miniapps.clearForeground()
+      // Stop the app after a short delay to ensure the screenshot is captured and navigation went smooth:
       engine.miniapps.stop(packageName)
     },
-    [packageName, goBack, onClosePress],
+    [packageName, viewShotRef, goBack],
   )
 
   const handleLeftPress = useCallback(
     async (shouldGoBack?: boolean) => {
-      if (onMinimizePress) {
-        onMinimizePress()
-        return
-      }
       console.log(`CAPSULE MENU: handleLeftPress() called ${shouldGoBack}`)
 
       await captureScreenshot(viewShotRef, packageName, insetsTopRef.current, {settle: true})
@@ -107,7 +96,7 @@ export function useRegisterCapsule({
       }
       engine.miniapps.clearForeground()
     },
-    [packageName, viewShotRef, goBack, onMinimizePress],
+    [packageName, viewShotRef, goBack],
   )
 
   // Always run focusEffectPreventBack with the same shape every render to keep

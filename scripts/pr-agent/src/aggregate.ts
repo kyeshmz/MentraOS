@@ -6,7 +6,6 @@ import {
   mergeFindings,
   openBlocking,
   parseVerdictFromText,
-  pruneStaleNitsFromSource,
   resolveStaleFindingsFromSource,
   sourceCounts,
   verdictToFindings,
@@ -24,32 +23,9 @@ export type ReviewOutputs = {
   bugbot?: string;
   bugbotCheckCompleted?: boolean;
   bugbotCheckSuccess?: boolean;
-  /**
-   * Whether Bugbot's check run appeared at all. `false` means Bugbot declined
-   * the PR, which drops the slot from the effective pair rather than counting
-   * as a negative review.
-   */
-  bugbotStarted?: boolean;
   /** Normalized live inline comments from allowlisted external bots. */
   external?: ExternalFindings;
 };
-
-/**
- * Slots that actually contributed an opinion this cycle. A Bugbot that never
- * opened a check run reviewed nothing, so scoring it as disapproval pinned
- * `consecutiveNoNewReviews` at 0 and stranded PRs that no CI event would ever
- * re-trigger (#3851 sat at cycle 1 with a clean standards approve). Bugbot
- * that *started* and then timed out keeps the conservative treatment.
- */
-export function effectiveReviewPair(
-  activePair: ReviewSlot[],
-  reviews: ReviewOutputs,
-): ReviewSlot[] {
-  if (!activePair.includes('bugbot') || reviews.bugbotStarted !== false) {
-    return activePair;
-  }
-  return activePair.filter((slot) => slot !== 'bugbot');
-}
 
 export function slotReviewSucceeded(slot: ReviewSlot, reviews: ReviewOutputs): boolean {
   if (slot === 'standards' || slot === 'depth' || slot === 'codex') {
@@ -121,21 +97,13 @@ export function aggregateCycle(
       );
       openFindings = staleResolved.open;
       resolvedFindings = staleResolved.resolved;
-      // Same reasoning for nits: one this source no longer reports is fixed.
-      nitFindings = pruneStaleNitsFromSource(
-        nitFindings,
-        source,
-        new Set(nits.map((n) => n.fingerprint)),
-      );
     }
   };
 
-  const effectivePair = effectiveReviewPair(activePair, reviews);
-
-  if (effectivePair.includes('standards')) ingest(reviews.standards, 'standards');
-  if (effectivePair.includes('depth')) ingest(reviews.depth, 'depth');
-  if (effectivePair.includes('codex')) ingest(reviews.codex, 'codex');
-  if (effectivePair.includes('bugbot')) {
+  if (activePair.includes('standards')) ingest(reviews.standards, 'standards');
+  if (activePair.includes('depth')) ingest(reviews.depth, 'depth');
+  if (activePair.includes('codex')) ingest(reviews.codex, 'codex');
+  if (activePair.includes('bugbot')) {
     if (reviews.bugbotCheckCompleted === true && reviews.bugbot) {
       ingest(reviews.bugbot, 'bugbot', {
         resolveOnApprove: reviews.bugbotCheckSuccess === true,
@@ -178,11 +146,10 @@ export function aggregateCycle(
       );
       openFindings = stale.open;
       resolvedFindings = stale.resolved;
-      nitFindings = pruneStaleNitsFromSource(nitFindings, source, liveFingerprints);
     }
   }
 
-  const allSlotsSucceeded = effectivePair.every((slot) => slotReviewSucceeded(slot, reviews));
+  const allSlotsSucceeded = activePair.every((slot) => slotReviewSucceeded(slot, reviews));
 
   const newBlockingCount = newBlockingFingerprints.length;
   const ciFailed =
@@ -196,7 +163,7 @@ export function aggregateCycle(
   // ran this cycle" still bumped both). Persist any external-comment ledger
   // updates, but leave every convergence counter untouched and schedule
   // nothing — the next genuine cycle re-runs the same pair.
-  const anyReviewIngested = effectivePair.some((slot) => slotReviewSucceeded(slot, reviews));
+  const anyReviewIngested = activePair.some((slot) => slotReviewSucceeded(slot, reviews));
   if (activePair.length > 0 && !anyReviewIngested) {
     return {
       state: {
@@ -204,7 +171,7 @@ export function aggregateCycle(
         openFindings,
         resolvedFindings,
         nitFindings,
-        lastPair: effectivePair,
+        lastPair: activePair,
       },
       shouldFix: false,
       shouldHandoff: false,
@@ -295,7 +262,7 @@ export function aggregateCycle(
     handoffReason = 'human_handoff';
   }
 
-  let shouldHandoff =
+  const shouldHandoff =
     status === 'human_handoff' || status === 'budget_exhausted' || status === 'diverging';
 
   const shouldFix =
@@ -303,24 +270,6 @@ export function aggregateCycle(
     status === 'in_progress' &&
     (openCount > 0 || ciFailed) &&
     state.fixRound < config.limits.maxFixRounds;
-
-  // No CI gate matches this diff, so no `workflow_run` completion will ever
-  // arrive, and with no fix scheduled there is no push either. This cycle was
-  // the last event the PR would get on its own.
-  const wantsContinuation = !shouldHandoff && !shouldFix && ciChecks.length === 0;
-  const continuationBudgetSpent =
-    state.selfDispatches >= config.limits.maxSelfDispatches;
-
-  // Out of self-dispatches with nothing left to drive the loop: hand the PR to
-  // a human instead of leaving it silently in_progress forever, which is the
-  // stranding this whole mechanism exists to prevent (#3851).
-  if (wantsContinuation && continuationBudgetSpent && status === 'in_progress') {
-    status = 'budget_exhausted';
-    handoffReason = 'budget_exhausted';
-    shouldHandoff = true;
-  }
-
-  const needsContinuation = wantsContinuation && !continuationBudgetSpent;
 
   const nextState: PrAgentState = {
     ...state,
@@ -332,7 +281,7 @@ export function aggregateCycle(
     consecutiveNoNewReviews,
     phase,
     frozenPair,
-    lastPair: effectivePair,
+    lastPair: activePair,
     status,
     stagnationFixRounds,
     lastOpenCount: internalOpenCount,
@@ -351,7 +300,6 @@ export function aggregateCycle(
     ciFailed,
     newBlockingCount,
     newBlockingFindings,
-    needsContinuation,
   };
 }
 

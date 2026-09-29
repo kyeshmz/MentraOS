@@ -1,3 +1,4 @@
+import {useState} from "react"
 import {AlignLeft, Loader2, MessageSquare, Mic, Pause, Play, Square, Trash2, Volume2} from "lucide-react"
 
 import type {RecorderStatus} from "../../shared/types"
@@ -5,8 +6,6 @@ import {fmtDateTime, fmtTimer} from "../lib/format"
 import {Waveform} from "./Waveform"
 
 interface Props {
-  view: View
-  onViewChange: (view: View) => void
   status: RecorderStatus
   levels: number[]
   transcript: string
@@ -35,8 +34,6 @@ function langLabel(code: string): string {
 
 /** Full-screen capture view: waveform / live transcript, timer, pause + stop. */
 export function RecordingScreen({
-  view,
-  onViewChange: setView,
   status,
   levels,
   transcript,
@@ -48,6 +45,7 @@ export function RecordingScreen({
   onStop,
   onCancel,
 }: Props) {
+  const [view, setView] = useState<View>("audio")
   // Capture start comes from the background (stable across pause + reopen), not
   // when this screen mounted.
   const startedAt = status.startedAt

@@ -17,7 +17,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.format.DateFormat;
-import com.mentra.bluetoothsdk.utils.NativeLog;
+import android.util.Log;
 import com.google.protobuf.CodedInputStream;
 import com.google.protobuf.CodedOutputStream;
 import com.google.protobuf.WireFormat;
@@ -2144,19 +2144,19 @@ public class Ar99 extends SGCManager {
       return;
     }
     // Logcat: adb logcat -s Ar99Opus (DEBUG = per-chunk length; INFO = first chunk + hex)
-    NativeLog.d(LOG_TAG_OPUS, "notify len=" + data.length);
+    Log.d(LOG_TAG_OPUS, "notify len=" + data.length);
     if (!opusLoggedFirstInSession) {
       opusLoggedFirstInSession = true;
-      NativeLog.i(
+      Log.i(
           LOG_TAG_OPUS,
           "Opus BLE (first chunk) len=" + data.length + " head16=" + hexPrefixUpper(data, 16));
     }
     if (!getMicEnabled()) {
-      NativeLog.w(LOG_TAG_OPUS, "received OPUS while glasses micEnabled=false; decoding anyway");
+      Log.w(LOG_TAG_OPUS, "received OPUS while glasses micEnabled=false; decoding anyway");
     }
     ensureOpusDecoder();
     if (opusPcmDecoder == null) {
-      NativeLog.w(LOG_TAG_OPUS, "decoder unavailable; skipping PCM");
+      Log.w(LOG_TAG_OPUS, "decoder unavailable; skipping PCM");
       return;
     }
     opusPcmDecoder.submitBleNotify(data);
@@ -2187,11 +2187,11 @@ public class Ar99 extends SGCManager {
   }
 
   private void logSend(String message) {
-    NativeLog.d(TAG, message);
+    Log.d(TAG, message);
   }
 
   private void logRecv(String message) {
-    NativeLog.d(TAG, message);
+    Log.d(TAG, message);
   }
 
   private synchronized void ensureOpusDecoder() {
@@ -2211,7 +2211,7 @@ public class Ar99 extends SGCManager {
                 @Override
                 public void onNotifyProcessed(int rawLen, int pcmFrames, int pcmBytesOut) {
                   if (pcmFrames > 0) {
-                    NativeLog.d(
+                    Log.d(
                         LOG_TAG_OPUS,
                         "decoded PCM chunks="
                             + pcmFrames

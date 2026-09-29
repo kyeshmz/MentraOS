@@ -164,8 +164,7 @@ export async function release(opts: ReleaseOptions = {}): Promise<void> {
 
   await printQR(qrUrl)
   const wrotePng = await writeQRPng(qrUrl, qrOutputPath)
-  console.log(`\nRelease server URL: ${baseUrl}`)
-  console.log(`${qrUrl}`)
+  console.log(`\n${qrUrl}`)
   if (wrotePng) {
     console.log(`PNG QR: ${qrOutputPath}\n`)
   } else {

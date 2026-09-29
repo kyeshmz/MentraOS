@@ -17,8 +17,8 @@
  *
  * See docs/issues/004-cloud-client/design.md ("cloud.auth").
  */
-import type {KeyValueStore} from "../../transports"
-import {decodeClaims} from "./jwt"
+import type { KeyValueStore } from "../../transports";
+import { decodeClaims } from "./jwt";
 
 /**
  * Storage key for the persisted refresh token.
@@ -26,20 +26,19 @@ import {decodeClaims} from "./jwt"
  * Namespaced so it cannot collide with anything else a host keeps in the same
  * secure store.
  */
-export const DEFAULT_REFRESH_TOKEN_KEY = "mentra.cloud-client.refreshToken"
+const REFRESH_TOKEN_KEY = "mentra.cloud-client.refreshToken";
 
 /** The access token plus its Unix-seconds expiry, held in memory only. */
 interface AccessTokenState {
-  accessToken: string
-  exp: number
+  accessToken: string;
+  exp: number;
 }
 
 export class TokenStore {
-  private readonly storage: KeyValueStore
-  private readonly storageKey: string
+  private readonly storage: KeyValueStore;
 
   /** The current access token, or null before the first exchange/refresh. */
-  private access: AccessTokenState | null = null
+  private access: AccessTokenState | null = null;
 
   /**
    * In-flight operations keyed by a caller-chosen string.
@@ -47,11 +46,10 @@ export class TokenStore {
    * Holding the promise (not just a boolean) lets every concurrent caller await
    * the same result, which is the whole point of single-flight here.
    */
-  private readonly inFlight = new Map<string, Promise<unknown>>()
+  private readonly inFlight = new Map<string, Promise<unknown>>();
 
-  constructor(deps: {storage: KeyValueStore; storageKey?: string}) {
-    this.storage = deps.storage
-    this.storageKey = deps.storageKey ?? DEFAULT_REFRESH_TOKEN_KEY
+  constructor(deps: { storage: KeyValueStore }) {
+    this.storage = deps.storage;
   }
 
   /**
@@ -61,7 +59,7 @@ export class TokenStore {
    * caller (auth) decides whether it is still fresh using `exp`.
    */
   current(): AccessTokenState | null {
-    return this.access
+    return this.access;
   }
 
   /**
@@ -72,12 +70,12 @@ export class TokenStore {
    * relaunch. We read `exp` here (rather than in the caller) to keep all the
    * token-state bookkeeping in one place.
    */
-  async save(tokens: {accessToken: string; refreshToken: string}): Promise<void> {
+  async save(tokens: { accessToken: string; refreshToken: string }): Promise<void> {
     this.access = {
       accessToken: tokens.accessToken,
       exp: decodeClaims(tokens.accessToken).exp,
-    }
-    await this.storage.set(this.storageKey, tokens.refreshToken)
+    };
+    await this.storage.set(REFRESH_TOKEN_KEY, tokens.refreshToken);
   }
 
   /**
@@ -87,7 +85,7 @@ export class TokenStore {
    * process or restored out of band is always the one used.
    */
   refreshToken(): Promise<string | null> {
-    return this.storage.get(this.storageKey)
+    return this.storage.get(REFRESH_TOKEN_KEY);
   }
 
   /**
@@ -99,7 +97,7 @@ export class TokenStore {
    * refresh token, rather than handing back the rejected token again.
    */
   invalidateAccess(): void {
-    this.access = null
+    this.access = null;
   }
 
   /**
@@ -109,8 +107,8 @@ export class TokenStore {
    * presenting a known-bad token to the cloud.
    */
   async clear(): Promise<void> {
-    this.access = null
-    await this.storage.delete(this.storageKey)
+    this.access = null;
+    await this.storage.delete(REFRESH_TOKEN_KEY);
   }
 
   /**
@@ -123,18 +121,18 @@ export class TokenStore {
    * refresh failed, all callers waiting on it should see that failure.
    */
   singleFlight<T>(key: string, fn: () => Promise<T>): Promise<T> {
-    const existing = this.inFlight.get(key)
-    if (existing) return existing as Promise<T>
+    const existing = this.inFlight.get(key);
+    if (existing) return existing as Promise<T>;
 
     const promise = (async () => {
       try {
-        return await fn()
+        return await fn();
       } finally {
-        this.inFlight.delete(key)
+        this.inFlight.delete(key);
       }
-    })()
+    })();
 
-    this.inFlight.set(key, promise)
-    return promise
+    this.inFlight.set(key, promise);
+    return promise;
   }
 }

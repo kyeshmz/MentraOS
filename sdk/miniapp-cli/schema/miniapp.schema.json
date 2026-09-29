@@ -91,7 +91,6 @@
             "enum": [
               "MICROPHONE",
               "CAMERA",
-              "PHONE_CAMERA",
               "CALENDAR",
               "LOCATION",
               "BACKGROUND_LOCATION",

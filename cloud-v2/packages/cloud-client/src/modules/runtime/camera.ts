@@ -20,6 +20,7 @@ import type { HttpClient } from "../../http";
 import { systemTimers, type CloudClientTimers } from "../../timers";
 import type {
   CloudToClientMessage,
+  PhotoOptions,
   StreamOptions,
   ManagedStream,
   StreamStatusResult,
@@ -28,6 +29,7 @@ import type {
 // The camera wire types are canonical in the protocol package (the cloud server
 // uses the same ones); re-export them so a host gets them from this module.
 export type {
+  PhotoOptions,
   StreamOptions,
   ManagedStream,
   StreamStatusResult,
@@ -86,8 +88,8 @@ export class Camera {
    * the POST has already resolved by the time we await it, so the key exists
    * before any push can be processed for it.
    */
-  async requestPhoto(): Promise<PhotoResult> {
-    const { requestId } = await this.startPhoto();
+  async requestPhoto(opts: PhotoOptions): Promise<PhotoResult> {
+    const { requestId } = await this.startPhoto(opts);
     return this.awaitPhotoReady(requestId);
   }
 
@@ -98,7 +100,7 @@ export class Camera {
    * `photo.ready` push can fire; plain consumers can keep using
    * {@link requestPhoto}, which composes both steps.
    */
-  async startPhoto(): Promise<{
+  async startPhoto(opts: PhotoOptions): Promise<{
     requestId: string;
     uploadUrl: string;
     readUrl: string;
@@ -107,7 +109,7 @@ export class Camera {
       requestId: string;
       uploadUrl: string;
       readUrl: string;
-    }>(PHOTO_PATH);
+    }>(PHOTO_PATH, opts);
   }
 
   /** Step 2: resolve when the cloud pushes `photo.ready` for the request. */

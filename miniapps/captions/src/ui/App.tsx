@@ -1,4 +1,5 @@
-import {useColorScheme, useHistoryState, useSafeArea} from "@mentra/miniapp/ui"
+import {useState} from "react"
+import {useColorScheme, useSafeArea} from "@mentra/miniapp/ui"
 
 import {BottomNav} from "./components/BottomNav"
 import {Header} from "./components/Header"
@@ -19,8 +20,8 @@ import {useTranscripts} from "./hooks/useTranscripts"
  * cross-origin backend to authenticate against in the local runtime.
  */
 export function App() {
-  const [activeTab, setActiveTab] = useHistoryState<"captions" | "settings">("tab", "captions")
-  const [showLanguageSelector, setShowLanguageSelector] = useHistoryState("languageSelector", false)
+  const [activeTab, setActiveTab] = useState<"captions" | "settings">("captions")
+  const [showLanguageSelector, setShowLanguageSelector] = useState(false)
   const isDark = useColorScheme() === "dark"
   const {insets} = useSafeArea()
   const {developerMode, holdHandlers} = useDeveloperMode()

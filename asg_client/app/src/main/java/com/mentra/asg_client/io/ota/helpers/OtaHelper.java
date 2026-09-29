@@ -8,7 +8,6 @@ import android.content.pm.Signature;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
 import android.util.Log;
 import android.content.Intent;
 
@@ -18,7 +17,6 @@ import org.greenrobot.eventbus.EventBus;
 import org.greenrobot.eventbus.Subscribe;
 import org.greenrobot.eventbus.ThreadMode;
 import com.mentra.asg_client.AsgConstants;
-import com.mentra.asg_client.RecoveryWorkerManager;
 import com.mentra.asg_client.events.BatteryStatusEvent;
 import com.mentra.asg_client.io.ota.events.DownloadProgressEvent;
 import com.mentra.asg_client.io.ota.events.InstallationProgressEvent;
@@ -44,19 +42,18 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.Semaphore;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 import com.mentra.asg_client.io.ota.session.OtaSessionManager;
 import com.mentra.asg_client.io.ota.utils.DowngradeGate;
-import com.mentra.asg_client.io.ota.utils.MtkOtaSelector;
 import com.mentra.asg_client.io.ota.utils.FirmwareDownloadException;
 import com.mentra.asg_client.io.ota.utils.OtaConstants;
 import com.mentra.asg_client.service.system.core.SystemControllerFactory;
 import com.mentra.asg_client.settings.AsgSettings;
 import com.mentra.asg_client.service.utils.SysProp;
-import com.mentra.asg_client.service.utils.ProcessSessionId;
 import com.mentra.asg_client.utils.WakeLockManager;
+
+import org.json.JSONArray;
 
 public class OtaHelper {
 
@@ -90,8 +87,6 @@ public class OtaHelper {
     // window without changing the existing single-worker pipeline.
     private static final Semaphore otaAdmissionPermit = new Semaphore(1);
     private static volatile boolean isUpdating = false;  // Tracks download/install in progress
-    // Observation sequence only; the existing semaphore remains the sole admission owner.
-    private static final AtomicLong otaAdmissionGeneration = new AtomicLong();
 
     // Downgrade handoff verdict plumbing: the watchdog must be cancellable because recovery
     // answers every handoff synchronously (accepted/refused); "no answer" is reserved for a
@@ -126,7 +121,7 @@ public class OtaHelper {
     private PhoneConnectionProvider phoneConnectionProvider;
 
     // Session manager for persisting OTA state across APK restarts
-    private volatile OtaSessionManager sessionManager;
+    private OtaSessionManager sessionManager;
 
     // Track phone-initiated vs glasses-initiated OTA
     private static volatile boolean isPhoneInitiatedOta = false;
@@ -146,7 +141,6 @@ public class OtaHelper {
     // Progress throttling - send every 2s OR every 5% change
     private long lastProgressSentTime = 0;
     private int lastProgressSentPercent = 0;
-    private volatile long downloadBytes = 0;
     private static final long PROGRESS_MIN_INTERVAL_MS = 2000; // 2 seconds
     private static final int PROGRESS_MIN_CHANGE_PERCENT = 5;   // 5%
     // Current update stage for progress reporting
@@ -286,47 +280,6 @@ public class OtaHelper {
         }
     }
 
-    /**
-     * Additive diagnostics for an explicitly requested status observation. No admission is
-     * acquired, no worker is started, and raw session reads do not expire or clear state.
-     * A missing owner is reported as null rather than guessed idle. The normal BES-first
-     * status projection remains independent of this process-local activity snapshot.
-     */
-    public JSONObject getOtaActivitySnapshot(String requestId) throws JSONException {
-        long admissionGeneration = otaAdmissionGeneration.get();
-        boolean admissionHeld = otaAdmissionPermit.availablePermits() != 1;
-        boolean updating = isUpdating;
-        boolean mtkInProgress = isMtkOtaInProgress;
-        IBesOtaController controller = getOtaController();
-        OtaSessionManager currentSessionManager = sessionManager;
-        JSONObject session = currentSessionManager != null
-                ? currentSessionManager.getActivitySnapshot() : null;
-        Object besInProgress = controller != null
-                ? controller.isBesOtaInProgress() : JSONObject.NULL;
-
-        JSONObject snapshot = new JSONObject();
-        snapshot.put("schema", 1);
-        snapshot.put("request_id", requestId);
-        snapshot.put("process_sid", ProcessSessionId.SID);
-        snapshot.put("admission_generation", admissionGeneration);
-        // Read flags again after the other owners. An admission observed on either side
-        // remains busy; observing status never takes the semaphore from a real update.
-        snapshot.put("updating", updating || isUpdating);
-        snapshot.put("mtk_in_progress", mtkInProgress || isMtkOtaInProgress);
-        snapshot.put("bes_in_progress", besInProgress);
-        snapshot.put("session", session != null ? session : JSONObject.NULL);
-        snapshot.put("admission_held", admissionHeld || otaAdmissionPermit.availablePermits() != 1);
-        snapshot.put("consistent", admissionGeneration == otaAdmissionGeneration.get());
-        snapshot.put("elapsed_realtime_ms", SystemClock.elapsedRealtime());
-        return snapshot;
-    }
-
-    private static boolean reserveOtaAdmission() {
-        if (!otaAdmissionPermit.tryAcquire()) return false;
-        otaAdmissionGeneration.incrementAndGet();
-        return true;
-    }
-
     private JSONObject getAuthoritativeBesStatus() {
         IBesOtaController controller = getOtaController();
         return controller != null ? controller.getAuthoritativeStatus() : null;
@@ -338,19 +291,7 @@ public class OtaHelper {
      * @return true when a durable projection exists, even if the phone is currently disconnected
      */
     public boolean sendAuthoritativeBesStatusToPhone() {
-        JSONObject status;
-        OtaSessionManager currentSession = sessionManager;
-        if (currentSession == null) {
-            status = getAuthoritativeBesStatus();
-        } else {
-            // Keep the native read and session transition together. New phone admission retires
-            // the old native record before creating its session; it must not reuse this session
-            // between reading the old result and settling it. Phone delivery stays outside.
-            synchronized (currentSession) {
-                status = getAuthoritativeBesStatus();
-                currentSession.reconcileBesTerminalStatus(status);
-            }
-        }
+        JSONObject status = getAuthoritativeBesStatus();
         if (status == null) {
             Log.i(TAG, "BES_OTA_DIAG phone_projection=absent");
             return false;
@@ -445,9 +386,9 @@ public class OtaHelper {
                     break;
                 }
             }
-            if (!wasMtkUpdatedThisSession() && !isMtkOtaInProgress()) {
+            if (!wasMtkUpdatedThisSession() && !isMtkOtaInProgress() && rootJson.has("mtk_patches")) {
                 String currentMtk = SysProp.getProperty(context, "ro.custom.ota.version");
-                JSONObject mtkPatch = MtkOtaSelector.select(rootJson, currentMtk);
+                JSONObject mtkPatch = findMatchingMtkPatch(rootJson.getJSONArray("mtk_patches"), currentMtk);
                 if (mtkPatch != null) steps.add("mtk");
             }
             if (rootJson.has("bes_firmware")) {
@@ -543,7 +484,7 @@ public class OtaHelper {
 
         // Reserve admission before arming phone state or the wake lease. Semaphore ownership can
         // cross threads, so the worker can release the reservation when the pipeline finishes.
-        if (!reserveOtaAdmission()) {
+        if (!otaAdmissionPermit.tryAcquire()) {
             Log.i(
                     TAG,
                     "📱 OTA already in progress - acknowledging ota_start and sending current"
@@ -581,7 +522,6 @@ public class OtaHelper {
             // Reset progress tracking
             lastProgressSentTime = 0;
             lastProgressSentPercent = 0;
-            downloadBytes = 0;
 
             Log.i(
                     TAG,
@@ -618,7 +558,7 @@ public class OtaHelper {
             Log.e(TAG, "Refusing OTA version check without a manifest URL");
             return false;
         }
-        if (!reserveOtaAdmission()) {
+        if (!otaAdmissionPermit.tryAcquire()) {
             Log.w(TAG, "Version check admission is busy; refusing before worker dispatch");
             return false;
         }
@@ -944,10 +884,10 @@ public class OtaHelper {
                 } else if (isMtkOtaInProgress()) {
                     Log.i(TAG, "📱 MTK update currently in progress - skipping MTK check");
                     mtkPatch = null;
-                } else {
+                } else if (rootJson.has("mtk_patches")) {
                     String currentMtkVersion = SysProp.getProperty(context, "ro.custom.ota.version");
                     Log.d(TAG, "Current MTK version: " + currentMtkVersion);
-                    mtkPatch = MtkOtaSelector.select(rootJson, currentMtkVersion);
+                    mtkPatch = findMatchingMtkPatch(rootJson.getJSONArray("mtk_patches"), currentMtkVersion);
                     if (mtkPatch != null) {
                         Log.i(TAG, "MTK patch found for current version: " + currentMtkVersion);
                     }
@@ -1204,9 +1144,9 @@ public class OtaHelper {
 
     private boolean hasApplicableFirmwareUpdate(JSONObject rootJson, Context context) {
         try {
-            if (!wasMtkUpdatedThisSession() && !isMtkOtaInProgress()) {
+            if (!wasMtkUpdatedThisSession() && !isMtkOtaInProgress() && rootJson.has("mtk_patches")) {
                 String currentMtkVersion = SysProp.getProperty(context, "ro.custom.ota.version");
-                if (MtkOtaSelector.select(rootJson, currentMtkVersion) != null) {
+                if (findMatchingMtkPatch(rootJson.getJSONArray("mtk_patches"), currentMtkVersion) != null) {
                     return true;
                 }
             }
@@ -1284,8 +1224,8 @@ public class OtaHelper {
             currentUpdateStage = "install";
             sendProgressToPhone("install", 0, 0, 0, "STARTED", null);
 
-            Intent handoff =
-                    RecoveryWorkerManager.newRecoveryIntent(OtaConstants.RECOVERY_REQUEST_DOWNGRADE);
+            Intent handoff = new Intent(OtaConstants.RECOVERY_REQUEST_DOWNGRADE);
+            handoff.setPackage(OtaConstants.RECOVERY_PACKAGE);
             handoff.putExtra(OtaConstants.EXTRA_DOWNGRADE_TARGET_VERSION, targetVersion);
             handoff.putExtra(OtaConstants.EXTRA_DOWNGRADE_APK_PATH, apkFile.getAbsolutePath());
             handoff.putExtra(OtaConstants.EXTRA_DOWNGRADE_APK_SHA256, expectedSha);
@@ -1589,15 +1529,15 @@ public class OtaHelper {
         if (!isAsgClientApk(pm, apkPath)) {
             return;
         }
-        Intent intent =
-                RecoveryWorkerManager.newRecoveryIntent(OtaConstants.RECOVERY_INSTALL_IN_PROGRESS);
+        Intent intent = new Intent(OtaConstants.RECOVERY_INSTALL_IN_PROGRESS);
+        intent.setPackage(OtaConstants.RECOVERY_PACKAGE);
         context.sendBroadcast(intent, OtaConstants.RECOVERY_CONTROL_PERMISSION);
         Log.d(TAG, "Notified recovery worker: install in progress");
     }
 
     public static void notifyRecoveryInstallCompleted(Context context) {
-        Intent intent =
-                RecoveryWorkerManager.newRecoveryIntent(OtaConstants.RECOVERY_INSTALL_COMPLETED);
+        Intent intent = new Intent(OtaConstants.RECOVERY_INSTALL_COMPLETED);
+        intent.setPackage(OtaConstants.RECOVERY_PACKAGE);
         context.sendBroadcast(intent, OtaConstants.RECOVERY_CONTROL_PERMISSION);
         Log.d(TAG, "Notified recovery worker: install completed");
     }
@@ -2094,6 +2034,57 @@ public class OtaHelper {
 
     // ========== BES Firmware Update Methods ==========
     /**
+     * Find MTK firmware patch matching the current version.
+     * MTK requires sequential updates - must find patch starting from current version.
+     * @param patches Array of patch objects with start_firmware, end_firmware, url
+     * @param currentVersion Current MTK firmware version as reported by
+     *     {@code ro.custom.ota.version}, e.g. "MentraLive_20260820.1"; both sides are
+     *     normalized before comparison, so a bare "20260820.1" would also match
+     * @return Matching patch object, or null if no match or version unknown
+     */
+    private JSONObject findMatchingMtkPatch(JSONArray patches, String currentVersion) {
+        if (currentVersion == null || currentVersion.isEmpty()) {
+            Log.w(TAG, "Cannot match MTK patch - current version unknown");
+            return null;
+        }
+        String normalizedCurrentVersion = normalizeMtkFirmwareVersion(currentVersion);
+
+        try {
+            for (int i = 0; i < patches.length(); i++) {
+                JSONObject patch = patches.getJSONObject(i);
+                String startFirmware = patch.getString("start_firmware");
+                if (normalizeMtkFirmwareVersion(startFirmware).equals(normalizedCurrentVersion)) {
+                    Log.i(TAG, "Found matching MTK patch: " + startFirmware + " -> " + patch.getString("end_firmware"));
+                    return patch;
+                }
+            }
+        } catch (JSONException e) {
+            Log.e(TAG, "Error parsing MTK patches", e);
+            return null;
+        }
+
+        Log.i(TAG, "No MTK patch available for current version: " + currentVersion);
+        return null;
+    }
+
+    /**
+     * Reduce an MTK version string to its version suffix so manifest entries and the device
+     * property match regardless of any "MentraLive_"-style prefix. Both normally carry the
+     * prefix; this is defensive so a bare suffix on either side still matches.
+     */
+    private String normalizeMtkFirmwareVersion(String version) {
+        if (version == null) {
+            return "";
+        }
+        String trimmed = version.trim();
+        int separator = trimmed.lastIndexOf('_');
+        if (separator >= 0 && separator + 1 < trimmed.length()) {
+            return trimmed.substring(separator + 1);
+        }
+        return trimmed;
+    }
+
+    /**
      * Check if BES firmware update is available.
      * BES does not require sequential updates - can install any newer version directly.
      * If current version is unknown, assume update is needed.
@@ -2130,7 +2121,7 @@ public class OtaHelper {
      * Compare two version strings.
      * Supports dotted formats like "17.26.1.14" (BES) or bare dates like "20241130".
      * MTK patch matching does not use this - it uses normalized exact equality in
-     * {@link MtkOtaSelector}.
+     * {@link #findMatchingMtkPatch}.
      * @param version1 First version string
      * @param version2 Second version string
      * @return positive if version1 > version2, negative if version1 < version2, 0 if equal
@@ -2436,8 +2427,8 @@ public class OtaHelper {
     }
 
     private JSONObject buildBesInstallStartStatus() {
-        updateSessionFromProgress("install", 0, 0, "STARTED", null);
-        lastProgressSentTime = android.os.SystemClock.elapsedRealtime();
+        updateSessionFromProgress("install", 0, "STARTED", null);
+        lastProgressSentTime = System.currentTimeMillis();
         lastProgressSentPercent = 0;
         lastOtaPhoneStage = "install";
         lastOtaPhoneProgress = 0;
@@ -2517,11 +2508,13 @@ public class OtaHelper {
                 return false;
             }
 
-            // Both delta and full entries were selected before reaching the common installer.
-            boolean isSelectedMtkUpdate = firmwareInfo.has("end_firmware");
+            // Detect if this is a patch object (from findMatchingMtkPatch) or legacy firmware info
+            // Patch objects have start_firmware/end_firmware fields and are already version-matched
+            boolean isPatchObject = firmwareInfo.has("start_firmware");
 
-            if (isSelectedMtkUpdate) {
-                String startFirmware = firmwareInfo.optString("start_firmware", "full OTA");
+            if (isPatchObject) {
+                // Patch object - version matching already done by findMatchingMtkPatch()
+                String startFirmware = firmwareInfo.optString("start_firmware", "unknown");
                 String endFirmware = firmwareInfo.optString("end_firmware", "unknown");
                 Log.i(TAG, "MTK patch update: " + startFirmware + " -> " + endFirmware);
             } else {
@@ -2601,9 +2594,15 @@ public class OtaHelper {
                 Log.i(TAG, "MTK firmware update initiated - system will handle in background");
             }, 1000); // 1 second delay
 
-            // Only a terminal system-updater result releases install ownership. The phone
-            // detects stalled progress, but elapsed time does not mean update_engine stopped.
-            // In particular, a retry must not replace the ZIP while it is still being read.
+            // 10-minute timeout: if no broadcast arrives, clear isMtkOtaInProgress
+            final long MTK_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
+            mtkHandler.postDelayed(() -> {
+                if (isMtkOtaInProgress) {
+                    Log.e(TAG, "MTK install timeout after " + (MTK_INSTALL_TIMEOUT_MS / 60000) + " min — no broadcast received, clearing flag");
+                    isMtkOtaInProgress = false;
+                    sendMtkInstallProgressToPhone("FAILED", 0, "MTK install timed out — no response from system");
+                }
+            }, MTK_INSTALL_TIMEOUT_MS);
 
             return true;
         } catch (Exception e) {
@@ -2624,7 +2623,7 @@ public class OtaHelper {
      * @param context Application context
      * @return true if downloaded and verified successfully
      */
-    boolean downloadMtkFirmware(String firmwareUrl, JSONObject firmwareInfo, Context context) {
+    private boolean downloadMtkFirmware(String firmwareUrl, JSONObject firmwareInfo, Context context) {
         try {
             boolean success = downloadMtkFirmwareInternal(firmwareUrl, firmwareInfo, context);
             if (success) {
@@ -2675,16 +2674,18 @@ public class OtaHelper {
         conn.setReadTimeout(OtaConstants.READ_TIMEOUT_MS);
         conn.connect();
 
-        // Bounded full-OTA-capable limit. Content-length is checked first; the
+        // 100 MiB hard cap. Server-advertised content-length is checked first; the
         // streaming loop also enforces the cap so a missing/lying header
         // (Content-Length: -1) cannot drain disk.
-        long fileSize = conn.getContentLengthLong();
-        long expectedSize = firmwareInfo.optLong("size", 0);
-        try {
-            validateMtkResponse(expectedSize, fileSize, asgDir.getUsableSpace());
-        } catch (FirmwareDownloadException e) {
+        final long maxBytes = 100L * 1024 * 1024;
+        long fileSize = conn.getContentLength();
+
+        if (fileSize > maxBytes) {
             conn.disconnect();
-            throw e;
+            throw new FirmwareDownloadException(
+                FirmwareDownloadException.CODE_FILE_TOO_LARGE,
+                "MTK firmware file too large: " + fileSize + " bytes (max " + maxBytes + ")"
+            );
         }
 
         InputStream in = conn.getInputStream();
@@ -2699,16 +2700,18 @@ public class OtaHelper {
 
         currentUpdateType = "mtk";
 
-        final long progressSize = expectedSize > 0 ? expectedSize : fileSize;
-        sendProgressToPhone("download", 0, 0, progressSize, "STARTED", null);
         try {
             while ((len = in.read(buffer)) > 0) {
                 total += len;
-                validateMtkReceivedBytes(expectedSize, total);
+                if (total > maxBytes) {
+                    throw new FirmwareDownloadException(
+                        FirmwareDownloadException.CODE_FILE_TOO_LARGE,
+                        "MTK firmware exceeded " + maxBytes + " bytes during streaming (Content-Length=" + fileSize + ")"
+                    );
+                }
                 out.write(buffer, 0, len);
 
-                int progress = progressSize > 0 ? (int) (total * 100 / progressSize) : 0;
-                sendProgressToPhone("download", progress, total, progressSize, "PROGRESS", null);
+                int progress = fileSize > 0 ? (int) (total * 100 / fileSize) : 0;
                 if (progress >= lastProgress + 10 || progress == 100) {
                     Log.d(TAG, "MTK firmware download progress: " + progress + "%");
                     EventBus.getDefault().post(new DownloadProgressEvent(
@@ -2728,16 +2731,9 @@ public class OtaHelper {
 
         Log.i(TAG, "MTK firmware downloaded to: " + firmwareFile.getAbsolutePath());
 
-        if (expectedSize > 0 && total != expectedSize) {
-            firmwareFile.delete();
-            throw new FirmwareDownloadException(
-                FirmwareDownloadException.CODE_VERIFY_FAILED, "MTK firmware size does not match manifest");
-        }
-
         boolean verified = verifyMtkFirmwareChecksum(firmwareFile.getAbsolutePath(), firmwareInfo);
         if (verified) {
             Log.i(TAG, "MTK firmware file verified successfully");
-            sendProgressToPhone("download", 100, total, progressSize, "FINISHED", null);
             return true;
         } else {
             firmwareFile.delete();
@@ -2745,30 +2741,6 @@ public class OtaHelper {
                 FirmwareDownloadException.CODE_VERIFY_FAILED,
                 "MTK firmware sha256 verification failed"
             );
-        }
-    }
-
-    static void validateMtkResponse(long expected, long advertised, long freeBytes) throws FirmwareDownloadException {
-        if (expected > 0 && advertised >= 0 && expected != advertised) {
-            throw new FirmwareDownloadException(FirmwareDownloadException.CODE_VERIFY_FAILED,
-                    "MTK response length does not match manifest");
-        }
-        long required = expected > 0 ? expected : Math.max(advertised, 0);
-        validateMtkReceivedBytes(0, required);
-        if (required > 0 && freeBytes < required * 2) {
-            throw new FirmwareDownloadException(AsgConstants.OTA_INSUFFICIENT_STORAGE,
-                    "Insufficient space for MTK ZIP and payload");
-        }
-    }
-
-    static void validateMtkReceivedBytes(long expected, long received) throws FirmwareDownloadException {
-        if (expected > 0 && received > expected) {
-            throw new FirmwareDownloadException(FirmwareDownloadException.CODE_VERIFY_FAILED,
-                    "MTK firmware exceeds manifest size");
-        }
-        if (received > AsgConstants.MTK_OTA_MAX_DOWNLOAD_BYTES) {
-            throw new FirmwareDownloadException(FirmwareDownloadException.CODE_FILE_TOO_LARGE,
-                    "MTK firmware exceeds maximum size");
         }
     }
 
@@ -2850,14 +2822,13 @@ public class OtaHelper {
     private void sendProgressToPhone(String stage, int progress, long bytesDownloaded,
                                      long totalBytes, String status, String errorMessage) {
 
-        downloadBytes = "download".equals(stage) ? bytesDownloaded : 0;
-        updateSessionFromProgress(stage, progress, bytesDownloaded, status, errorMessage);
+        updateSessionFromProgress(stage, progress, status, errorMessage);
 
         if (phoneConnectionProvider == null || !isPhoneConnected()) {
             return;
         }
 
-        long now = android.os.SystemClock.elapsedRealtime();
+        long now = System.currentTimeMillis();
         boolean shouldSend = false;
 
         // Always send STARTED, FINISHED, FAILED immediately
@@ -2888,7 +2859,7 @@ public class OtaHelper {
         sendOtaStatus();
     }
 
-    private void updateSessionFromProgress(String stage, int progress, long bytesDownloaded, String status, String errorMessage) {
+    private void updateSessionFromProgress(String stage, int progress, String status, String errorMessage) {
         if (sessionManager == null || sessionManager.getSessionState() == null) return;
 
         int stepIndex = findStepIndex(currentUpdateType);
@@ -2919,9 +2890,6 @@ public class OtaHelper {
             }
         } else if ("FAILED".equals(status)) {
             sessionManager.setFailed(errorMessage != null ? errorMessage : "Update failed");
-        }
-        if ("download".equals(stage) && !"FAILED".equals(status)) {
-            sessionManager.updateDownloadProgress(progress, bytesDownloaded);
         }
     }
 
@@ -3105,7 +3073,6 @@ public class OtaHelper {
             o.put("current_step", 1);
             o.put("step_type", currentUpdateType != null ? currentUpdateType : "apk");
             o.put("phase", lastOtaPhoneStage != null ? lastOtaPhoneStage : "download");
-            if ("download".equals(o.optString("phase"))) o.put("bytes_downloaded", downloadBytes);
             o.put("step_percent", lastOtaPhoneProgress);
             o.put("overall_percent", lastOtaPhoneProgress);
             String ev = lastOtaPhoneEventStatus;
@@ -3277,7 +3244,7 @@ public class OtaHelper {
             String targetVersion,
             String expectedSha256,
             String artifactId) {
-        if (!reserveOtaAdmission()) {
+        if (!otaAdmissionPermit.tryAcquire()) {
             Log.e(TAG, "DEBUG BES install blocked - phone OTA admission is active");
             return false;
         }

@@ -356,10 +356,7 @@ public class OtaService extends Service {
 
     private void checkAndResumeAfterApkUpdate() {
         try {
-            // The helper advances later firmware steps. Clear the restart guard on that same
-            // manager, not a second in-memory snapshot that leaves the helper's guard armed.
-            OtaSessionManager sessionManager = otaHelper != null
-                    ? otaHelper.getSessionManager() : new OtaSessionManager(this);
+            OtaSessionManager sessionManager = new OtaSessionManager(this);
 
             if (sessionManager.hasActiveSession() && sessionManager.isInRestartGuard()) {
                 Log.i(TAG, "📱 Active OTA session found in restart guard - auto-continuing");

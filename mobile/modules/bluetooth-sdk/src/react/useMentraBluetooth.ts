@@ -106,7 +106,6 @@ export type ScanController = {
   active: boolean
   clear: () => void
   devices: Device[]
-  diagnostic: GlassesConnectionHookResult["scan"]["diagnostic"]
   error: unknown | null
   model: DeviceModel
   selectedDevice: Device | null
@@ -121,11 +120,6 @@ export type UseMentraBluetoothOptions = {
   defaultDeviceStorage?: DefaultDeviceStorage
   defaultModel?: DeviceModel
   onError?: (error: unknown) => void
-  /**
-   * Whether iOS should require ANCS authorization when automatically connecting.
-   * Defaults to true. Android accepts this option as a no-op.
-   */
-  requiresAncs?: boolean
   scanTimeoutMs?: number
 }
 
@@ -258,7 +252,6 @@ function scanController(connection: GlassesConnectionHookResult): ScanController
     active: connection.scan.scanning,
     clear: connection.scan.clearResults,
     devices: connection.scan.devices,
-    diagnostic: connection.scan.diagnostic,
     error: connection.scan.error,
     model: connection.scan.model,
     selectedDevice: connection.scan.selectedDevice,
@@ -274,7 +267,6 @@ export function useMentraBluetooth(options: UseMentraBluetoothOptions = {}): Men
     autoConnectDefault: options.autoConnectDefault,
     defaultDeviceStorage: options.defaultDeviceStorage,
     onError: options.onError,
-    requiresAncs: options.requiresAncs,
     scanModel: options.defaultModel ?? DeviceModels.MentraLive,
     scanTimeoutMs: options.scanTimeoutMs,
   })

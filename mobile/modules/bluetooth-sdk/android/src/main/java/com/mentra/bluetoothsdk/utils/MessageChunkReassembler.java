@@ -1,6 +1,6 @@
 package com.mentra.bluetoothsdk.utils;
 
-import com.mentra.bluetoothsdk.utils.NativeLog;
+import android.util.Log;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -21,7 +21,7 @@ public class MessageChunkReassembler {
         cleanupTimedOutSessions();
 
         if (msgId < 0 || fragCount <= 0 || fragIdx < 0 || fragIdx >= fragCount || data == null) {
-            NativeLog.w(TAG, "Dropping invalid binary fragment: msgId=" + msgId + ", index=" + fragIdx
+            Log.w(TAG, "Dropping invalid binary fragment: msgId=" + msgId + ", index=" + fragIdx
                     + ", total=" + fragCount);
             return null;
         }
@@ -36,7 +36,7 @@ public class MessageChunkReassembler {
                 return new BinarySession(msgId, fragCount);
             }
             if (existingSession.fragCount != fragCount) {
-                NativeLog.w(TAG, "fragCount mismatch for msgId " + msgId + ", resetting session");
+                Log.w(TAG, "fragCount mismatch for msgId " + msgId + ", resetting session");
                 return new BinarySession(msgId, fragCount);
             }
             return existingSession;
@@ -52,7 +52,7 @@ public class MessageChunkReassembler {
 
         byte[] reassembled = session.reassemble();
         activeBinarySessions.remove(msgId);
-        NativeLog.d(TAG, "Reassembled binary message of " + reassembled.length + " bytes from "
+        Log.d(TAG, "Reassembled binary message of " + reassembled.length + " bytes from "
                 + fragCount + " fragments");
         return reassembled;
     }
@@ -62,13 +62,13 @@ public class MessageChunkReassembler {
 
         if (chunkId == null || chunkId.isEmpty() || totalChunks <= 0 || chunkIndex < 0
                 || chunkIndex >= totalChunks || data == null) {
-            NativeLog.w(TAG, "Dropping invalid chunk metadata: id=" + chunkId + ", index=" + chunkIndex
+            Log.w(TAG, "Dropping invalid chunk metadata: id=" + chunkId + ", index=" + chunkIndex
                     + ", total=" + totalChunks);
             return null;
         }
 
         if (activeSessions.size() >= MAX_CONCURRENT_SESSIONS && !activeSessions.containsKey(chunkId)) {
-            NativeLog.w(TAG, "Maximum concurrent chunk sessions reached, dropping oldest");
+            Log.w(TAG, "Maximum concurrent chunk sessions reached, dropping oldest");
             removeOldestSession();
         }
 
@@ -77,7 +77,7 @@ public class MessageChunkReassembler {
                 return new ChunkSession(chunkId, totalChunks);
             }
             if (existingSession.totalChunks != totalChunks) {
-                NativeLog.w(TAG, "totalChunks mismatch for " + chunkId + " (expected "
+                Log.w(TAG, "totalChunks mismatch for " + chunkId + " (expected "
                         + existingSession.totalChunks + ", got " + totalChunks + "), resetting session");
                 return new ChunkSession(chunkId, totalChunks);
             }
@@ -85,11 +85,11 @@ public class MessageChunkReassembler {
         });
         boolean added = session.addChunk(chunkIndex, data);
         if (!added) {
-            NativeLog.w(TAG, "Failed to add chunk " + chunkIndex + " to session " + chunkId);
+            Log.w(TAG, "Failed to add chunk " + chunkIndex + " to session " + chunkId);
             return null;
         }
 
-        NativeLog.d(TAG, "Added chunk " + chunkIndex + "/" + (totalChunks - 1) + " for session " + chunkId);
+        Log.d(TAG, "Added chunk " + chunkIndex + "/" + (totalChunks - 1) + " for session " + chunkId);
 
         if (!session.isComplete()) {
             return null;
@@ -97,7 +97,7 @@ public class MessageChunkReassembler {
 
         String reassembled = session.reassemble();
         activeSessions.remove(chunkId);
-        NativeLog.d(TAG, "Reassembled message of " + reassembled.length() + " bytes from " + totalChunks + " chunks");
+        Log.d(TAG, "Reassembled message of " + reassembled.length() + " bytes from " + totalChunks + " chunks");
         return reassembled;
     }
 

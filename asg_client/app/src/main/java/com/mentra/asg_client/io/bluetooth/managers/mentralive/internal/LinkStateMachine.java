@@ -107,12 +107,6 @@ public final class LinkStateMachine {
         /** BES accepts large file packs (advertised together with file_payload_v2). */
         public final boolean bigPacks;
 
-        /** BES handles cs_mictun / cs_micst / cs_micrms (wire_caps.mic_tuning). */
-        public final boolean micTuning;
-
-        /** BES handles cs_weartun / cs_wearst / cs_wrst (wire_caps.wear_tuning). */
-        public final boolean wearTuning;
-
         /** Highest wire protocol version the BES advertised. */
         public final int proto;
 
@@ -131,26 +125,12 @@ public final class LinkStateMachine {
                 boolean bigPacks,
                 int proto,
                 int notifyCap) {
-            this(k900Le, binary, filePayloadV2, bigPacks, proto, notifyCap, false, false);
-        }
-
-        public BesCaps(
-                boolean k900Le,
-                boolean binary,
-                boolean filePayloadV2,
-                boolean bigPacks,
-                int proto,
-                int notifyCap,
-                boolean micTuning,
-                boolean wearTuning) {
             this.k900Le = k900Le;
             this.binary = binary;
             this.filePayloadV2 = filePayloadV2;
             this.bigPacks = bigPacks;
             this.proto = proto;
             this.notifyCap = notifyCap;
-            this.micTuning = micTuning;
-            this.wearTuning = wearTuning;
         }
 
         /**
@@ -168,9 +148,7 @@ public final class LinkStateMachine {
                     filePayloadV2 || advertised.filePayloadV2,
                     bigPacks || advertised.bigPacks,
                     advertised.binary ? advertised.proto : proto,
-                    advertised.notifyCap > 0 ? advertised.notifyCap : notifyCap,
-                    micTuning || advertised.micTuning,
-                    wearTuning || advertised.wearTuning);
+                    advertised.notifyCap > 0 ? advertised.notifyCap : notifyCap);
         }
 
         /**
@@ -181,15 +159,7 @@ public final class LinkStateMachine {
         BesCaps withoutNotifyCap() {
             return notifyCap == 0
                     ? this
-                    : new BesCaps(
-                            k900Le,
-                            binary,
-                            filePayloadV2,
-                            bigPacks,
-                            proto,
-                            0,
-                            micTuning,
-                            wearTuning);
+                    : new BesCaps(k900Le, binary, filePayloadV2, bigPacks, proto, 0);
         }
 
         /**
@@ -203,9 +173,7 @@ public final class LinkStateMachine {
                     filePayloadV2,
                     bigPacks,
                     Math.max(proto, BesWireFormat.PROTOCOL_VERSION_V2),
-                    notifyCap,
-                    micTuning,
-                    wearTuning);
+                    notifyCap);
         }
 
         @Override
@@ -222,22 +190,12 @@ public final class LinkStateMachine {
                     && filePayloadV2 == other.filePayloadV2
                     && bigPacks == other.bigPacks
                     && proto == other.proto
-                    && notifyCap == other.notifyCap
-                    && micTuning == other.micTuning
-                    && wearTuning == other.wearTuning;
+                    && notifyCap == other.notifyCap;
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(
-                    k900Le,
-                    binary,
-                    filePayloadV2,
-                    bigPacks,
-                    proto,
-                    notifyCap,
-                    micTuning,
-                    wearTuning);
+            return Objects.hash(k900Le, binary, filePayloadV2, bigPacks, proto, notifyCap);
         }
 
         @Override
@@ -254,10 +212,6 @@ public final class LinkStateMachine {
                     + proto
                     + ", notifyCap="
                     + notifyCap
-                    + ", micTuning="
-                    + micTuning
-                    + ", wearTuning="
-                    + wearTuning
                     + "}";
         }
     }

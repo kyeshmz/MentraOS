@@ -43,9 +43,7 @@ interface OfflineAppHostProps {
   appName?: string
   iconUrl?: string
   /** Compositor's handleBack — captures a screenshot and clears foreground. */
-  onExit: (capturePreview?: boolean) => void
-  onClose: () => void
-  onMinimize: () => void
+  onExit: () => void
   /** Capture an app-switcher screenshot without exiting. */
   onShouldCapture?: () => void
   showCapsule?: boolean
@@ -56,7 +54,7 @@ interface StackEntry {
   params?: any
 }
 
-export default function OfflineAppHost({packageName, appName, iconUrl, onExit, onClose, onMinimize, onShouldCapture, showCapsule = false}: OfflineAppHostProps) {
+export default function OfflineAppHost({packageName, appName, iconUrl, onExit, onShouldCapture, showCapsule = false}: OfflineAppHostProps) {
   const def = offlineAppRegistry[packageName]
 
   const [stack, setStack] = useState<StackEntry[]>(() => (def ? [{path: def.initialRoute}] : []))
@@ -94,9 +92,9 @@ export default function OfflineAppHost({packageName, appName, iconUrl, onExit, o
   // fade-out reaches the real router) THEN run the host's exit. Every exit
   // path — capsule house/X, compositor back, external-route fall-through —
   // goes through here so `activeRef` and the exit stay in lockstep.
-  const beginExit = useCallback((capturePreview = true) => {
+  const beginExit = useCallback(() => {
     activeRef.current = false
-    onExitRef.current(capturePreview)
+    onExitRef.current()
   }, [])
 
   const popOrExit = useCallback(() => {
@@ -176,12 +174,17 @@ export default function OfflineAppHost({packageName, appName, iconUrl, onExit, o
       // its own <CapsuleMenu forceShow /> below (same trick as LocalMiniappView).
       visibleOnRoutes: ["/intentionally-not-a-real-route"],
       handleLeftPress: () => {
-        activeRef.current = false
-        onMinimize()
+        beginExit()
       },
       handleRightPress: () => {
-        activeRef.current = false
-        onClose()
+        // Stop the app BEFORE playing the exit animation so it clears from the
+        // running-apps tray immediately. The overlay's slide-out is driven by
+        // the Compositor's foreground state (renderedApp is held mounted through
+        // the animation), so stopping now — which only flips the `running` flag
+        // — doesn't interrupt it. Deferring stop() (previously by 1s) left the
+        // app lingering in the tray for the whole animation, then popping out.
+        engine.miniapps.stop(packageName)
+        beginExit()
       },
     }
     useCapsuleStore.getState().setActive(registration)
@@ -190,7 +193,7 @@ export default function OfflineAppHost({packageName, appName, iconUrl, onExit, o
         useCapsuleStore.getState().setActive(null)
       }
     }
-  }, [packageName, appName, iconUrl, depth, onClose, onMinimize])
+  }, [packageName, appName, iconUrl, depth])
 
   // The Compositor's edge swipe (minimize-to-home) is only armed at the root
   // screen; deeper screens use the native stack's own back-swipe instead.

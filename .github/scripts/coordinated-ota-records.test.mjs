@@ -1,5 +1,4 @@
 import assert from "node:assert/strict"
-import {execFileSync} from "node:child_process"
 import {mkdirSync, mkdtempSync, readFileSync, writeFileSync} from "node:fs"
 import {tmpdir} from "node:os"
 import path from "node:path"
@@ -36,12 +35,6 @@ const releasePlan = {
   otaInputs: {
     firmwareManifest: {path: "asg_client/ota_manifests/firmware_live.json", sha256: "d".repeat(64)},
     mtkPatches: [{start_firmware: "20260709", end_firmware: "20260730", url: "https://example.com/mtk.zip"}],
-    mtkFullOta: {
-      end_firmware: "20260730",
-      url: "https://example.com/full.zip",
-      sha256: "f".repeat(64),
-      size: 640341205,
-    },
     besFirmware: {version: "26.8.1", url: "https://example.com/bes.bin"},
   },
 }
@@ -78,7 +71,6 @@ function fixture() {
           },
         },
         mtk_patches: releasePlan.otaInputs.mtkPatches,
-        mtk_full_ota: releasePlan.otaInputs.mtkFullOta,
         bes_firmware: releasePlan.otaInputs.besFirmware,
       },
       null,
@@ -86,44 +78,6 @@ function fixture() {
     )}\n`,
   )
   return {apkPath, bundlePath, manifestPath, selectionPath, provenance}
-}
-
-function prepareWorkflowNames(fixtureData, reused) {
-  const root = path.dirname(path.dirname(fixtureData.apkPath))
-  mkdirSync(path.join(root, "release-intent"))
-  mkdirSync(path.join(root, "coordinated-ota-work"))
-  writeFileSync(
-    path.join(root, "release-intent/release-plan.json"),
-    JSON.stringify({
-      ...releasePlan,
-      artifactContainerTag: "mentra-builds-v3.1.0",
-      artifactNames: {...releasePlan.artifactNames, otaBundle: path.basename(fixtureData.bundlePath)},
-    }),
-  )
-  writeFileSync(path.join(root, "coordinated-ota-work/asg-build-identity.json"), JSON.stringify(identity))
-  writeFileSync(path.join(root, "coordinated-ota-work/asg-provenance.json"), JSON.stringify(fixtureData.provenance))
-  const workflow = readFileSync(new URL("../workflows/reusable-coordinated-ota.yml", import.meta.url), "utf8")
-  const step = workflow.split("      - name: Prepare immutable asset names\n")[1].split("\n      - name:")[0]
-  const script = step.split("        run: |\n")[1].replace(/^          /gm, "")
-  const output = path.join(root, "output")
-  execFileSync("bash", ["-c", script], {
-    cwd: root,
-    env: {
-      ...process.env,
-      GITHUB_OUTPUT: output,
-      REPOSITORY: "Mentra-Community/MentraOS",
-      ASG_RELEASE_TAG: "mentra-coordinated-asg",
-      ASG_REUSED: String(reused),
-      EXPECTED_APK_ASSET: identity.apkAsset,
-      EXPECTED_PROVENANCE_ASSET: identity.provenanceAsset,
-    },
-  })
-  return Object.fromEntries(
-    readFileSync(output, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => line.split("=")),
-  )
 }
 
 test("creates and verifies immutable ASG provenance", () => {
@@ -164,13 +118,8 @@ test("rejects ASG bytes that differ from recorded provenance", () => {
   )
 })
 
-test("the OTA workflow reuses a historical GitHub APK URL through exact release-result validation", () => {
+test("creates a release result only for an exact ASG, MTK, and BES selection", () => {
   const fixtureData = fixture()
-  const outputs = prepareWorkflowNames(fixtureData, true)
-  assert.equal(outputs.apk_url, fixtureData.provenance.apk.url)
-  const manifest = JSON.parse(readFileSync(fixtureData.manifestPath, "utf8"))
-  manifest.apps["com.mentra.asg_client"].apkUrl = outputs.apk_url
-  writeFileSync(fixtureData.manifestPath, JSON.stringify(manifest))
   const result = createOtaReleaseResult({
     releasePlan,
     identity,
@@ -179,9 +128,10 @@ test("the OTA workflow reuses a historical GitHub APK URL through exact release-
     selectionUrl: "https://example.com/asg-selection.json",
     selectionStatus: "published",
     manifestPath: fixtureData.manifestPath,
-    manifestUrl: outputs.manifest_url,
+    manifestUrl: `https://github.com/Mentra-Community/MentraOS/releases/download/mentra-builds-v3.1.0/${releasePlan.artifactNames.otaManifest}`,
     bundlePath: fixtureData.bundlePath,
-    bundleUrl: outputs.bundle_url,
+    bundleUrl:
+      "https://github.com/Mentra-Community/MentraOS/releases/download/mentra-builds-v3.1.0/mentra-live-ota-bundle-3.1.0-beta.57.zip",
     bundleStatus: "published",
     manifestStatus: "reused",
     reused: true,
@@ -201,14 +151,6 @@ test("the OTA workflow reuses a historical GitHub APK URL through exact release-
   assert.equal(result.asg.originatingReleaseSetId, releasePlan.releaseSetId)
   assert.equal(result.firmwareManifestSha256, releasePlan.otaInputs.firmwareManifest.sha256)
   assert.match(result.manifest.sha256, /^[0-9a-f]{64}$/)
-})
-
-test("the OTA workflow assigns the CDN URL to a newly built ASG APK", () => {
-  const outputs = prepareWorkflowNames(fixture(), false)
-  assert.equal(
-    outputs.apk_url,
-    `https://artifactscdn.mentraglass.com/Mentra-Community/MentraOS/releases/mentra-coordinated-asg/${identity.apkAsset}`,
-  )
 })
 
 test("rejects a manifest attributed to a different coordinated release", () => {
@@ -316,11 +258,10 @@ test("compares promoted firmware semantically instead of by object key order", (
   )
 })
 
-for (const field of ["bes_firmware", "mtk_full_ota"]) {
-test(`rejects a manifest whose ${field} differs from release intent`, () => {
+test("rejects a manifest whose promoted firmware differs from release intent", () => {
   const fixtureData = fixture()
   const manifest = JSON.parse(readFileSync(fixtureData.manifestPath, "utf8"))
-  manifest[field].url = "https://example.com/unexpected"
+  manifest.bes_firmware.version = "unexpected"
   writeFileSync(fixtureData.manifestPath, JSON.stringify(manifest))
 
   assert.throws(
@@ -347,7 +288,6 @@ test(`rejects a manifest whose ${field} differs from release intent`, () => {
           runAttempt: 1,
         },
       }),
-    /(?:BES input|MTK full OTA) differs/,
+    /BES input differs/,
   )
 })
-}

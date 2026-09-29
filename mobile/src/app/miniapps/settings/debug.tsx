@@ -7,7 +7,6 @@ import OtaVersionUrl from "@/components/dev/OtaVersionUrl"
 import {Header, Icon, Screen, Text} from "@/components/ignite"
 import SelectSetting from "@/components/settings/SelectSetting"
 import ToggleSetting from "@/components/settings/ToggleSetting"
-import IosMiniappSettings from "@/components/settings/IosMiniappSettings"
 import {Group} from "@/components/ui/Group"
 import {RouteButton} from "@/components/ui/RouteButton"
 import {Spacer} from "@/components/ui/Spacer"
@@ -86,7 +85,6 @@ export default function DebugSettingsScreen() {
                 onValueChange={(value) => setAndroidNotificationListenerEnabled(value)}
               />
             )}
-            <IosMiniappSettings />
             <ToggleSetting
               label={translate("settings:reconnectOnAppForeground")}
               subtitle={translate("settings:reconnectOnAppForegroundSubtitle")}
@@ -124,11 +122,6 @@ export default function DebugSettingsScreen() {
           </Group>
 
           <Group title="Quick Links">
-            <RouteButton
-              label={translate("debugSettings:otaPreview")}
-              subtitle={translate("debugSettings:otaPreviewSubtitle")}
-              onPress={() => push("/miniapps/settings/ota-preview")}
-            />
             <RouteButton label="Sitemap" subtitle="View the app's route map" onPress={() => push("/_sitemap")} />
 
             <RouteButton
@@ -179,7 +172,7 @@ export default function DebugSettingsScreen() {
           </Group>
 
           <Group title="Misc">
-            <RouteButton label="Test miniapp" subtitle="Test the miniapp" onPress={() => push("/test/mini-app")} />
+            <RouteButton label="Test Mini App" subtitle="Test the Mini App" onPress={() => push("/test/mini-app")} />
 
             <RouteButton
               label={navRunning ? "Stop Test Nav" : "Start Test Nav"}

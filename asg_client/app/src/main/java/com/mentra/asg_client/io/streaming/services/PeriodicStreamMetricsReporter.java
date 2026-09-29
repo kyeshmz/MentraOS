@@ -4,7 +4,6 @@ import android.os.Handler;
 import android.util.Log;
 import androidx.annotation.Nullable;
 import com.mentra.asg_client.AsgConstants;
-import com.mentra.asg_client.io.streaming.StreamTelemetryPolicy;
 import com.mentra.asg_client.io.streaming.interfaces.StreamingStatusCallback;
 
 /** Periodically forwards stream telemetry while an RTMP or SRT publisher is active. */
@@ -127,7 +126,7 @@ final class PeriodicStreamMetricsReporter {
     }
 
     void start() {
-        if (!StreamTelemetryPolicy.isEnabled()) {
+        if (!AsgConstants.ENABLE_PIPELINE_FPS_TELEMETRY) {
             return;
         }
         stop();
@@ -139,7 +138,7 @@ final class PeriodicStreamMetricsReporter {
     }
 
     static void logQuality(String source, @Nullable String streamId, MetricsSample sample) {
-        if (!StreamTelemetryPolicy.isEnabled()) {
+        if (!AsgConstants.ENABLE_PIPELINE_FPS_TELEMETRY) {
             return;
         }
         String temp =

@@ -241,12 +241,6 @@ class PhoneMic private constructor(private val context: Context) {
             return true
         }
 
-        // Reject unavailable candidates before disturbing the active recorder. DeviceManager
-        // tries these in one ranked pass, so an unsupported HQ profile must not stop HFP.
-        if (mode == MicTypes.BLUETOOTH && !isHighQualityBluetoothAvailable()) return false
-        if (mode == MicTypes.BLUETOOTH_CLASSIC && !audioManager.isBluetoothScoAvailableOffCall) return false
-        if (mode !in listOf(MicTypes.PHONE_INTERNAL, MicTypes.BLUETOOTH_CLASSIC, MicTypes.BLUETOOTH)) return false
-
         // recording with a different mode, so stop recording and start recording with the new mode:
         if (isRecording.get()) {
             Bridge.log(
@@ -262,10 +256,14 @@ class PhoneMic private constructor(private val context: Context) {
             return false
         }
 
-        // Do not debounce ranked candidates: failure must allow the next source to
-        // start immediately. isRecordingWithMode above already makes repeated starts
-        // of the selected source idempotent. The legacy startRecording entry retains
-        // its own debounce for independent recording requests.
+        // Smart debouncing
+        val now = System.currentTimeMillis()
+        if (now - lastModeChangeTime < MODE_CHANGE_DEBOUNCE_MS) {
+            Bridge.log("MIC: Debouncing rapid recording request")
+            return false
+        }
+
+        lastModeChangeTime = System.currentTimeMillis()
 
         // Check for conflicts
         if (isPhoneCallActive) {
@@ -293,10 +291,20 @@ class PhoneMic private constructor(private val context: Context) {
             }
             MicTypes.BLUETOOTH_CLASSIC -> {
                 Bridge.log("MIC: Starting Bluetooth Classic (SCO)")
+                if (!audioManager.isBluetoothScoAvailableOffCall) {
+                    Bridge.log("MIC: Bluetooth SCO not available")
+                    notifyDeviceManager("bt_classic_unavailable", emptyList())
+                    return false
+                }
                 return startRecordingBtClassic()
             }
             MicTypes.BLUETOOTH -> {
                 Bridge.log("MIC: Starting high-quality Bluetooth mic")
+                if (!isHighQualityBluetoothAvailable()) {
+                    Bridge.log("MIC: High-quality Bluetooth not available")
+                    notifyDeviceManager("bt_hq_unavailable", emptyList())
+                    return false
+                }
                 return startRecordingBtHighQuality()
             }
             else -> {
@@ -355,7 +363,7 @@ class PhoneMic private constructor(private val context: Context) {
             return success
         } catch (e: Exception) {
             Bridge.log("MIC: Phone internal recording failed: ${e.message}")
-            com.mentra.bluetoothsdk.utils.NativeLog.e("PhoneMic", "Native exception", e)
+            e.printStackTrace()
             return false
         }
     }

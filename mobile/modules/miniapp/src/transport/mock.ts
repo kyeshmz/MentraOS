@@ -56,8 +56,6 @@ export interface MockTransportOptions {
   packageName?: string
   /** Suppress the [mock-transport] console logs. Default false. */
   silent?: boolean
-  /** Package-scoped host configuration returned in CONNECT_ACK. */
-  configuration?: Readonly<Record<string, string>>
 }
 
 export class MockTransport implements Transport {
@@ -68,14 +66,12 @@ export class MockTransport implements Transport {
   private readonly authToken: string
   private readonly packageName: string | null
   private readonly silent: boolean
-  private readonly configuration: Readonly<Record<string, string>>
 
   constructor(options: MockTransportOptions = {}) {
     this.userId = options.userId ?? "mock-user"
     this.authToken = options.authToken ?? "mock-miniapp-token"
     this.packageName = options.packageName ?? null
     this.silent = options.silent === true
-    this.configuration = {...(options.configuration ?? {})}
   }
 
   async open(): Promise<void> {
@@ -152,7 +148,6 @@ export class MockTransport implements Transport {
       capabilities: null,
       visibility: "foreground",
       colorScheme: "light",
-      configuration: {...this.configuration},
       auth: {
         mentraUserId: this.userId,
         oemId: "mock",

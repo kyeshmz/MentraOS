@@ -101,10 +101,6 @@ export interface StreamVideoConfig {
   width?: number
   height?: number
   bitrate?: number
-  /** WHIP minimum target in bps; omitted leaves it unset. Clamped to the maximum. */
-  minBitrateBps?: number
-  /** WHIP startup bitrate in bps, clamped to the requested bounds. */
-  initialBitrateBps?: number
   fps?: number
 }
 

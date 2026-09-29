@@ -3,7 +3,7 @@ package com.mentra.bluetoothsdk.utils;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Build;
-import com.mentra.bluetoothsdk.utils.NativeLog;
+import android.util.Log;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
@@ -60,20 +60,20 @@ public class BlePhotoUploadService {
                                             UploadCallback callback) {
         new Thread(() -> {
             try {
-                NativeLog.d(TAG, "Processing BLE photo for upload. Image size: " + imageData.length + " bytes");
+                Log.d(TAG, "Processing BLE photo for upload. Image size: " + imageData.length + " bytes");
 
                 byte[] jpegData = convertToJpegPreservingExif(imageData);
-                NativeLog.d(TAG, "Converted to JPEG for upload. Size: " + jpegData.length + " bytes");
+                Log.d(TAG, "Converted to JPEG for upload. Size: " + jpegData.length + " bytes");
 
                 // 3. Upload to webhook
                 String responseBody =
                         uploadToWebhook(jpegData, imageData.length, requestId, webhookUrl, authToken);
 
-                NativeLog.d(TAG, "Photo uploaded successfully for requestId: " + requestId);
+                Log.d(TAG, "Photo uploaded successfully for requestId: " + requestId);
                 callback.onSuccess(requestId, responseBody);
 
             } catch (Exception e) {
-                NativeLog.e(TAG, "Error processing BLE photo for requestId: " + requestId, e);
+                Log.e(TAG, "Error processing BLE photo for requestId: " + requestId, e);
                 callback.onError(requestId, e.getMessage());
             }
         }).start();
@@ -86,7 +86,7 @@ public class BlePhotoUploadService {
     static byte[] convertToJpegPreservingExif(byte[] imageData) throws Exception {
         long conversionStartMs = System.currentTimeMillis();
         if (isJpeg(imageData)) {
-            NativeLog.d(
+            Log.d(
                     TAG,
                     "BLE relay pass-through: input already JPEG ("
                             + imageData.length
@@ -114,7 +114,7 @@ public class BlePhotoUploadService {
                 throw new Exception("Failed to decode image data");
             }
 
-            NativeLog.d(
+            Log.d(
                     TAG,
                     "AVIF decode complete: "
                             + bitmap.getWidth()
@@ -131,7 +131,7 @@ public class BlePhotoUploadService {
                 bitmap.recycle();
             }
             long encodeDurationMs = System.currentTimeMillis() - encodeStartMs;
-            NativeLog.d(
+            Log.d(
                     TAG,
                     "AVIF->JPEG encode complete: quality="
                             + AVIF_TO_JPEG_QUALITY
@@ -146,13 +146,13 @@ public class BlePhotoUploadService {
                 // already-decoded photo. Log and upload the plain JPEG instead.
                 try {
                     writeImuJsonToJpeg(outputFile.getAbsolutePath(), imuJson);
-                    NativeLog.d(TAG, "Re-attached IMU EXIF UserComment on output JPEG (" + imuJson.length() + " chars)");
+                    Log.d(TAG, "Re-attached IMU EXIF UserComment on output JPEG (" + imuJson.length() + " chars)");
                 } catch (Exception e) {
-                    NativeLog.w(TAG, "Failed to attach IMU EXIF; uploading photo without it", e);
+                    Log.w(TAG, "Failed to attach IMU EXIF; uploading photo without it", e);
                 }
             } else {
                 boolean rawHasExif = containsExifMarkerInBytes(imageData);
-                NativeLog.w(
+                Log.w(
                         TAG,
                         "No IMU from ExifInterface on "
                                 + inputFile.getName()
@@ -163,14 +163,14 @@ public class BlePhotoUploadService {
                                 + "). If rawHasExifMarker=true, EXIF may be present but unreadable via"
                                 + " ExifInterface on this container.");
             }
-            NativeLog.d(
+            Log.d(
                     TAG,
                     "AVIF metadata handling complete in "
                             + (System.currentTimeMillis() - metadataStartMs)
                             + "ms");
 
             byte[] jpegData = java.nio.file.Files.readAllBytes(outputFile.toPath());
-            NativeLog.d(
+            Log.d(
                     TAG,
                     "Phone image conversion complete: AVIF "
                             + imageData.length
@@ -204,7 +204,7 @@ public class BlePhotoUploadService {
         if (containsExifMarkerInBytes(imageData)) {
             String fromTiff = HeifExifTagReader.readImuJson(imageData);
             if (fromTiff != null && !fromTiff.isEmpty()) {
-                NativeLog.d(
+                Log.d(
                         TAG,
                         "Read IMU UserComment via TIFF scan ("
                                 + fromTiff.length()
@@ -223,7 +223,7 @@ public class BlePhotoUploadService {
             ExifInterface exif = new ExifInterface(imagePath);
             String userComment = exif.getAttribute(ExifInterface.TAG_USER_COMMENT);
             String imageDescription = exif.getAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION);
-            NativeLog.d(
+            Log.d(
                     TAG,
                     "ExifInterface on "
                             + imagePath
@@ -236,13 +236,13 @@ public class BlePhotoUploadService {
             }
             return imageDescription;
         } catch (IOException e) {
-            NativeLog.w(TAG, "Could not read EXIF from BLE image: " + imagePath, e);
+            Log.w(TAG, "Could not read EXIF from BLE image: " + imagePath, e);
             return null;
         }
     }
 
     private static void logIncomingImageDiagnostics(byte[] imageData, String tempPath) {
-        NativeLog.d(
+        Log.d(
                 TAG,
                 "BLE image diagnostics: size="
                         + imageData.length
@@ -336,12 +336,12 @@ public class BlePhotoUploadService {
                            && imageData[10] == 'i' && imageData[11] == 'f';
 
             if (isAvif) {
-                NativeLog.d(TAG, "Detected AVIF image format");
+                Log.d(TAG, "Detected AVIF image format");
                 byte[] strippedBytes = imageData;
                 if (containsExifMarkerInBytes(imageData)) {
                     try {
                         strippedBytes = AvifExifStripper.stripForDecode(imageData);
-                        NativeLog.d(
+                        Log.d(
                                 TAG,
                                 "Stripped Exif metadata item for decode: "
                                         + imageData.length
@@ -349,21 +349,21 @@ public class BlePhotoUploadService {
                                         + strippedBytes.length
                                         + " bytes");
                     } catch (Exception e) {
-                        NativeLog.w(TAG, "stripForDecode failed, using raw AVIF: " + e.getMessage());
+                        Log.w(TAG, "stripForDecode failed, using raw AVIF: " + e.getMessage());
                         strippedBytes = imageData;
                     }
                 }
                 Bitmap bmp = decodeAvifBytes(strippedBytes);
                 if (bmp == null && strippedBytes != imageData) {
-                    NativeLog.w(TAG, "Stripped AVIF decode failed; retrying original BLE bytes");
+                    Log.w(TAG, "Stripped AVIF decode failed; retrying original BLE bytes");
                     bmp = decodeAvifBytes(imageData);
                 }
                 return bmp;
             }
-            NativeLog.d(TAG, "Detected JPEG image format");
+            Log.d(TAG, "Detected JPEG image format");
             return BitmapFactory.decodeByteArray(imageData, 0, imageData.length);
         } catch (Exception e) {
-            NativeLog.e(TAG, "Failed to decode image", e);
+            Log.e(TAG, "Failed to decode image", e);
             return null;
         }
     }
@@ -376,12 +376,12 @@ public class BlePhotoUploadService {
                 return bmp;
             }
         } catch (Exception | LinkageError e) {
-            NativeLog.w(TAG, "HeifCoder AVIF decode unavailable/failed, trying BitmapFactory: " + e.getMessage());
+            Log.w(TAG, "HeifCoder AVIF decode unavailable/failed, trying BitmapFactory: " + e.getMessage());
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             return BitmapFactory.decodeByteArray(avifBytes, 0, avifBytes.length);
         }
-        NativeLog.e(TAG, "AVIF decoding requires Android 12+ (API 31+). Current API: " + Build.VERSION.SDK_INT);
+        Log.e(TAG, "AVIF decoding requires Android 12+ (API 31+). Current API: " + Build.VERSION.SDK_INT);
         return null;
     }
 
@@ -402,7 +402,7 @@ public class BlePhotoUploadService {
                     .append(" rate=").append(samplingRateHz).append("Hz")
                     .append(" duration=").append(durationMs).append("ms")
                     .append(" startNs=").append(startTimeNs);
-            NativeLog.d(TAG, sb.toString());
+            Log.d(TAG, sb.toString());
 
             if (samples != null && samples.length() > 0) {
                 // Log first and last sample: [timestampMs, ax, ay, az, gx, gy, gz]
@@ -412,14 +412,14 @@ public class BlePhotoUploadService {
                 }
             }
         } catch (Exception e) {
-            NativeLog.w(TAG, "logImuData: failed to parse IMU JSON: " + e.getMessage());
+            Log.w(TAG, "logImuData: failed to parse IMU JSON: " + e.getMessage());
         }
     }
 
     private static void logSample(String label, @Nullable JSONArray sample) {
         if (sample == null || sample.length() < 7) return;
         try {
-            NativeLog.d(
+            Log.d(
                     TAG,
                     "IMU " + label + " sample:"
                             + " t=" + sample.optLong(0) + "ms"
@@ -430,7 +430,7 @@ public class BlePhotoUploadService {
                             + ", " + String.format("%.3f", sample.optDouble(5))
                             + ", " + String.format("%.3f", sample.optDouble(6)) + "]rad/s");
         } catch (Exception e) {
-            NativeLog.w(TAG, "logSample: " + e.getMessage());
+            Log.w(TAG, "logSample: " + e.getMessage());
         }
     }
 
@@ -467,9 +467,9 @@ public class BlePhotoUploadService {
         Request request = requestBuilder.build();
 
         if (!effectiveWebhookUrl.equals(webhookUrl)) {
-            NativeLog.d(TAG, "Uploading BLE fallback photo to local receiver via loopback: " + effectiveWebhookUrl);
+            Log.d(TAG, "Uploading BLE fallback photo to local receiver via loopback: " + effectiveWebhookUrl);
         } else {
-            NativeLog.d(TAG, "Uploading photo to webhook: " + webhookUrl);
+            Log.d(TAG, "Uploading photo to webhook: " + webhookUrl);
         }
         long startMs = System.currentTimeMillis();
         traceRelayUploadStart(requestId, effectiveWebhookUrl, webhookUrl, authToken, sourceImageBytes, jpegData.length, startMs);
@@ -504,7 +504,7 @@ public class BlePhotoUploadService {
                 true,
                 "uploaded");
             responseTraced = true;
-            NativeLog.d(TAG, "Upload successful. Response code: " + response.code());
+            Log.d(TAG, "Upload successful. Response code: " + response.code());
             return responseBody;
         } catch (IOException e) {
             if (!responseTraced) {
@@ -665,11 +665,11 @@ public class BlePhotoUploadService {
                                       UploadCallback callback) {
         new Thread(() -> {
             try {
-                NativeLog.d(TAG, "Uploading pre-decoded JPEG. Size: " + jpegData.length + " bytes");
+                Log.d(TAG, "Uploading pre-decoded JPEG. Size: " + jpegData.length + " bytes");
                 String responseBody = uploadToWebhook(jpegData, requestId, webhookUrl, authToken);
                 callback.onSuccess(requestId, responseBody);
             } catch (Exception e) {
-                NativeLog.e(TAG, "Error uploading JPEG photo", e);
+                Log.e(TAG, "Error uploading JPEG photo", e);
                 callback.onError(requestId, e.getMessage());
             }
         }).start();

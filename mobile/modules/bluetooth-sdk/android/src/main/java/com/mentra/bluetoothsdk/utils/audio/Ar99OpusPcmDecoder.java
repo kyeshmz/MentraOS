@@ -1,6 +1,6 @@
 package com.mentra.bluetoothsdk.utils.audio;
 
-import com.mentra.bluetoothsdk.utils.NativeLog;
+import android.util.Log;
 
 import java.util.Arrays;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -76,7 +76,7 @@ public final class Ar99OpusPcmDecoder extends Thread {
     }
     byte[] payloadCopy = Arrays.copyOf(opusPayload, opusPayload.length);
     if (!taskQueue.offer(new Task(TaskType.DECODE, payloadCopy))) {
-      NativeLog.w(TAG, "AR99 Opus task queue full, drop notify len=" + payloadCopy.length);
+      Log.w(TAG, "AR99 Opus task queue full, drop notify len=" + payloadCopy.length);
     }
   }
 
@@ -123,7 +123,7 @@ public final class Ar99OpusPcmDecoder extends Thread {
       }
     } catch (InterruptedException e) {
       if (running) {
-        NativeLog.w(TAG, "AR99 Opus worker interrupted: " + e.getMessage());
+        Log.w(TAG, "AR99 Opus worker interrupted: " + e.getMessage());
       }
     } finally {
       taskQueue.clear();
@@ -150,7 +150,7 @@ public final class Ar99OpusPcmDecoder extends Thread {
     }
 
     if (buffer.length + chunk.length > MAX_BUFFER_SIZE) {
-      NativeLog.w(
+      Log.w(
           TAG,
           "AR99 Opus buffer overflow, clear"
               + ", oldBuf="
@@ -179,7 +179,7 @@ public final class Ar99OpusPcmDecoder extends Thread {
         if (drop > 0) {
           totalResyncDropBytes += drop;
           headerLooksStable = false;
-          NativeLog.w(
+          Log.w(
               TAG,
               "AR99 Opus resync drop(no header)"
                   + " notify#="
@@ -200,7 +200,7 @@ public final class Ar99OpusPcmDecoder extends Thread {
         headerLooksStable = false;
         headerMismatch++;
         totalHeaderMismatchCount++;
-        NativeLog.w(
+        Log.w(
             TAG,
             "AR99 Opus resync shift"
                 + " notify#="
@@ -234,7 +234,7 @@ public final class Ar99OpusPcmDecoder extends Thread {
         totalHeaderMismatchCount++;
         headerLooksStable = false;
         if (totalFrameCount <= MAX_DIAG_FRAMES || !headerLooksStable) {
-          NativeLog.w(
+          Log.w(
               TAG,
               "AR99 Opus frame header mismatch"
                   + " frame#="
@@ -265,7 +265,7 @@ public final class Ar99OpusPcmDecoder extends Thread {
         decodeFail++;
         totalDecodeFailCount++;
         if (totalFrameCount <= MAX_DIAG_FRAMES || !headerLooksStable) {
-          NativeLog.w(
+          Log.w(
               TAG,
               "AR99 Opus frame decode failed"
                   + " frame#="
@@ -289,7 +289,7 @@ public final class Ar99OpusPcmDecoder extends Thread {
         || skipPayload > 0
         || pcmFrames == 0
         || !headerLooksStable) {
-      NativeLog.d(
+      Log.d(
           TAG,
           "AR99 Opus decode summary"
               + " notify#="
@@ -337,7 +337,7 @@ public final class Ar99OpusPcmDecoder extends Thread {
       int bytes = samples * CHANNELS * 2;
       return Arrays.copyOf(pcm, bytes);
     } catch (OpusException | AssertionError | RuntimeException e) {
-      NativeLog.w(
+      Log.w(
           TAG,
           "AR99 Opus decode failed len="
               + opusPayload.length

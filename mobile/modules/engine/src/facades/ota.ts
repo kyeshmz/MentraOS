@@ -35,7 +35,6 @@ function projectSnapshot() {
     ready: isGlassesReady(s.connection),
     buildNumber: s.buildNumber || null,
     appVersion: s.appVersion || null,
-    packageName: s.packageName || null,
     mtkFirmwareVersion: s.mtkFirmwareVersion || null,
     besFirmwareVersion: s.besFirmwareVersion || null,
     batteryLevel: s.batteryLevel >= 0 ? s.batteryLevel : null,

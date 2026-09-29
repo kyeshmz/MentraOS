@@ -9,7 +9,7 @@ export default function MiniApp() {
   return (
     <Screen preset="fixed" safeAreaEdges={[]}>
       <Header
-        title="Miniapp"
+        title="MiniApp"
         titleMode="center"
         leftIcon="chevron-left"
         onLeftPress={() => goBack()}

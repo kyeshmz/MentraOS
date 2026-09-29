@@ -20,7 +20,6 @@ import {ModalProvider as LegacyModalProvider} from "@/utils/AlertUtils"
 import {ModalProvider} from "@/contexts/ModalContext"
 import {KonamiCodeProvider} from "@/utils/dev/konami"
 import ConnectionOverlayProvider from "@/contexts/ConnectionOverlayContext"
-import {DeploymentProvider} from "@/services/deployment"
 import {SaferAreaProvider, useSaferAreaInsets} from "@/contexts/SaferAreaContext"
 import CoreStatusBar from "@/components/dev/CoreStatusBar"
 import {useShallow} from "zustand/shallow"
@@ -78,7 +77,6 @@ export const AllProviders = withWrappers(
   SafeAreaProvider,
   SaferAreaProvider,
   KeyboardProvider,
-  DeploymentProvider,
   AuthProvider,
   SplashLoaderProvider,
   DeeplinkProvider,

@@ -69,7 +69,6 @@ public final class BleJsonCompact {
         putKey("height", "h");
         putKey("bitrate", "br");
         putKey("fps", "f");
-        putKey("captureAudio", "ca");
         putKey("droppedFrames", "df");
         putKey("duration", "du");
         putKey("temperatureC", "tc");

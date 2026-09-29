@@ -1,6 +1,6 @@
 package com.mentra.bluetoothsdk.utils;
 
-import com.mentra.bluetoothsdk.utils.NativeLog;
+import android.util.Log;
 
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
@@ -60,16 +60,16 @@ public final class IncidentLogBleUploadService {
                         .build();
                 try (Response response = client.newCall(request).execute()) {
                     if (response.isSuccessful()) {
-                        NativeLog.i(TAG, "Incident BLE relay upload OK: " + url);
+                        Log.i(TAG, "Incident BLE relay upload OK: " + url);
                         callback.onDone(true, null);
                     } else {
                         String msg = "HTTP " + response.code();
-                        NativeLog.e(TAG, "Incident BLE relay upload failed: " + msg + " " + url);
+                        Log.e(TAG, "Incident BLE relay upload failed: " + msg + " " + url);
                         callback.onDone(false, msg);
                     }
                 }
             } catch (IOException e) {
-                NativeLog.e(TAG, "Incident BLE relay upload IO error", e);
+                Log.e(TAG, "Incident BLE relay upload IO error", e);
                 callback.onDone(false, e.getMessage());
             }
         }).start();

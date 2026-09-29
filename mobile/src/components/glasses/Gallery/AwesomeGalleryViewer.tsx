@@ -22,7 +22,6 @@ import {PhotoInfo} from "@/types/asg"
 
 import {MediaMetadataSheet} from "./MediaMetadataSheet"
 import {MediaDimensions} from "./mediaMetadata"
-import {getVideoSeekTime, isVideoAtEnd, isVideoAtSeekTarget} from "./videoSeek"
 
 // Screen dimensions are now obtained via useWindowDimensions() hook for rotation support
 
@@ -61,12 +60,8 @@ const VideoPlayerItem = memo(function VideoPlayerItem({
   const {width: screenWidth, height: screenHeight} = useWindowDimensions()
   const videoRef = useRef<ElementRef<typeof Video>>(null)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [hasEnded, setHasEnded] = useState(false)
   const [showControls, setShowControls] = useState(true)
   const [currentTime, setCurrentTime] = useState(0)
-  const currentTimeRef = useRef(0)
-  const pendingSeekRef = useRef<{time: number} | null>(null)
-  const [isNativeSeeking, setIsNativeSeeking] = useState(false)
   const [duration, setDuration] = useState(0)
   const [isSeeking, setIsSeeking] = useState(false)
   const [hasError, setHasError] = useState(false)
@@ -75,67 +70,51 @@ const VideoPlayerItem = memo(function VideoPlayerItem({
   const [showThumbnail, setShowThumbnail] = useState(true)
   const [videoAspectRatio, setVideoAspectRatio] = useState(4 / 3)
   const wasInactiveRef = useRef(false)
+  const userPausedRef = useRef(false) // Track if user manually paused
 
-  const seekTo = useCallback((time: number) => {
-    const player = videoRef.current
-    if (!player) return
-
-    const pendingSeek = {time}
-    pendingSeekRef.current = pendingSeek
-    setIsNativeSeeking(true)
-    currentTimeRef.current = time
-    setCurrentTime(time)
-    setHasEnded(false)
-    // These native commands run in order on the UI queue. Keep the clock
-    // stopped through the position read, including when seek is a no-op.
-    player.pause()
-    player.seek(time)
-
-    // An unchanged-position seek has no onSeek on iOS. Read the native
-    // position so that case can settle without waiting for another event.
-    void player.getCurrentPosition().then(
-      (position) => {
-        if (pendingSeekRef.current === pendingSeek && isVideoAtSeekTarget(position, time)) {
-          pendingSeekRef.current = null
-          setIsNativeSeeking(false)
-        }
-      },
-      (error) => {
-        console.warn("[VideoPlayerItem] Could not read seek position:", error)
-        // A failed optional read must not leave callback-free seeks paused.
-        if (pendingSeekRef.current === pendingSeek) {
-          pendingSeekRef.current = null
-          setIsNativeSeeking(false)
-        }
-      },
-    )
-  }, [])
-
-  useEffect(
-    () => () => {
-      pendingSeekRef.current = null
-    },
-    [],
-  )
-
+  // Auto-play when this video becomes active, restart from beginning if returning
   useEffect(() => {
-    setIsPlaying(isActive)
-    if (isActive && wasInactiveRef.current) {
-      seekTo(0)
-      setIsSeeking(false)
-      setShowControls(true)
+    if (isActive) {
+      console.log("🎥 [VideoPlayerItem] Video became active:", photo.name)
+
+      // If video was previously inactive (user swiped away and came back), restart from beginning
+      if (wasInactiveRef.current) {
+        console.log("🎥 [VideoPlayerItem] Returning to video - restarting from beginning")
+        videoRef.current?.seek(0)
+        setCurrentTime(0)
+        userPausedRef.current = false // Reset user pause flag when returning
+        setIsPlaying(true)
+        setShowControls(true)
+        wasInactiveRef.current = false
+      } else if (!userPausedRef.current) {
+        // Only auto-play if user hasn't manually paused
+        // First time activation - auto-play unless video is at the end
+        if (!(duration > 0 && currentTime >= duration - 0.5)) {
+          console.log("🎥 [VideoPlayerItem] Starting playback (video not finished)")
+          setIsPlaying(true)
+        } else {
+          console.log("🎥 [VideoPlayerItem] Video already finished, not auto-playing")
+          setShowControls(true)
+        }
+      } else {
+        console.log("🎥 [VideoPlayerItem] User paused - respecting pause state")
+      }
+    } else {
+      console.log("🎥 [VideoPlayerItem] Video became inactive, pausing:", photo.name)
+      setIsPlaying(false)
+      userPausedRef.current = false // Reset user pause when leaving
+      wasInactiveRef.current = true // Mark that this video was deactivated
     }
-    wasInactiveRef.current = !isActive
-  }, [isActive, photo.name, seekTo])
+  }, [isActive, photo.name, duration, currentTime])
 
   // Hide controls after 3 seconds
   useEffect(() => {
-    if (showControls && isPlaying && isActive && !isSeeking) {
+    if (showControls && isPlaying && isActive) {
       const timer = setTimeout(() => setShowControls(false), 3000)
       return () => clearTimeout(timer)
     }
     return undefined
-  }, [showControls, isPlaying, isActive, isSeeking])
+  }, [showControls, isPlaying, isActive])
 
   const videoUrl = photo.download || photo.url
 
@@ -173,7 +152,7 @@ const VideoPlayerItem = memo(function VideoPlayerItem({
         posterResizeMode="contain"
         style={{width: "100%", aspectRatio: videoAspectRatio, backgroundColor: theme.colors.background}}
         resizeMode="contain"
-        paused={!isPlaying || !isActive || isSeeking || isNativeSeeking || hasError}
+        paused={!isPlaying}
         controls={false}
         repeat={false}
         playInBackground={false}
@@ -187,22 +166,13 @@ const VideoPlayerItem = memo(function VideoPlayerItem({
           bufferForPlaybackAfterRebufferMs: 1000,
         }}
         onProgress={({currentTime: time}) => {
-          const pendingSeek = pendingSeekRef.current
-          if (pendingSeek) {
-            // Discard queued progress (including the final progress preceding
-            // onEnd) until native playback has reached the requested position.
-            if (!isVideoAtSeekTarget(time, pendingSeek.time)) return
-            pendingSeekRef.current = null
-            setIsNativeSeeking(false)
-          }
-          if (!isSeeking && !hasEnded) {
-            currentTimeRef.current = time
+          if (!isSeeking) {
             setCurrentTime(time)
           }
         }}
         onLoad={({duration: dur, naturalSize}) => {
           console.log("🎥 [VideoPlayerItem] Video loaded, duration:", dur, "naturalSize:", naturalSize)
-          setDuration(Number.isFinite(dur) && dur > 0 ? dur : 0)
+          setDuration(dur)
           setHasError(false)
           if (naturalSize?.width && naturalSize?.height && naturalSize.height > 0) {
             setVideoAspectRatio(naturalSize.width / naturalSize.height)
@@ -228,27 +198,14 @@ const VideoPlayerItem = memo(function VideoPlayerItem({
           setErrorMessage(isCorrupted ? "Video file corrupted or unsupported format" : "Failed to play video")
           setIsPlaying(false)
           setIsBuffering(false)
-          setIsSeeking(false)
-          pendingSeekRef.current = null
-          setIsNativeSeeking(false)
-          if (isSeeking) onSeekingChange?.(false)
-        }}
-        onSeek={({seekTime}) => {
-          const pendingSeek = pendingSeekRef.current
-          if (pendingSeek && isVideoAtSeekTarget(seekTime, pendingSeek.time)) {
-            pendingSeekRef.current = null
-            setIsNativeSeeking(false)
-          }
         }}
         onEnd={() => {
-          if (isSeeking || pendingSeekRef.current || !isVideoAtEnd(currentTimeRef.current, duration)) return
           console.log("🎥 [VideoPlayerItem] Video playback ended:", photo.name)
           setIsPlaying(false)
           setShowControls(true)
-          setHasEnded(true)
-          currentTimeRef.current = duration
-          setCurrentTime(duration)
+          // Keep video at end position (don't auto-restart)
         }}
+        onSeek={() => setIsSeeking(false)}
       />
 
       {/* Buffering indicator */}
@@ -317,15 +274,18 @@ const VideoPlayerItem = memo(function VideoPlayerItem({
               <TouchableOpacity
                 onPress={() => {
                   console.log("🎮 [VideoControls] Play/Pause button pressed, current state:", isPlaying)
-                  if (hasEnded) {
+                  if (!isPlaying && duration > 0 && currentTime >= duration - 0.5) {
                     // Replay from beginning
                     console.log("🎮 [VideoControls] Replaying video from start")
-                    seekTo(0)
+                    videoRef.current?.seek(0)
+                    setCurrentTime(0)
+                    userPausedRef.current = false // User is resuming
                     setIsPlaying(true)
                   } else {
                     // Toggle play/pause
                     const newPlayingState = !isPlaying
                     console.log("🎮 [VideoControls] Toggling playback to:", newPlayingState)
+                    userPausedRef.current = !newPlayingState // Set pause flag when pausing
                     setIsPlaying(newPlayingState)
                     // Keep controls visible when pausing so user can see the state
                     if (!newPlayingState) {
@@ -336,7 +296,7 @@ const VideoPlayerItem = memo(function VideoPlayerItem({
                 style={themed($playButtonInline)}
                 hitSlop={{top: 10, bottom: 10, left: 10, right: 10}}>
                 <MaterialCommunityIcons
-                  name={isPlaying ? "pause" : hasEnded ? "replay" : "play"}
+                  name={isPlaying ? "pause" : duration > 0 && currentTime >= duration - 0.5 ? "replay" : "play"}
                   size={28}
                   color="white"
                 />
@@ -347,7 +307,6 @@ const VideoPlayerItem = memo(function VideoPlayerItem({
 
               {/* Seek slider */}
               <Slider
-                disabled={duration <= 0}
                 style={themed($seekBar)}
                 value={currentTime}
                 minimumValue={0}
@@ -360,10 +319,7 @@ const VideoPlayerItem = memo(function VideoPlayerItem({
                   onSeekingChange?.(true)
                 }}
                 onSlidingComplete={(value) => {
-                  const seekTime = getVideoSeekTime(value, duration)
-                  seekTo(seekTime)
-                  setIsSeeking(false)
-                  setShowControls(true)
+                  videoRef.current?.seek(value)
                   onSeekingChange?.(false)
                 }}
               />
@@ -451,12 +407,9 @@ export function CustomOverlay({onClose, currentIndex, total, onDetails, onShare}
         style={themed($actionButton)}>
         <Icon name="chevron-left" size={28} color={theme.colors.foreground} />
       </TouchableOpacity>
-      {/* Android honors pointerEvents on View, not this full-width Text overlay. */}
-      <View pointerEvents="none" style={themed($counter)}>
-        <Text style={themed($counterText)}>
-          {currentIndex + 1} / {total}
-        </Text>
-      </View>
+      <Text pointerEvents="none" style={themed($counterText)}>
+        {currentIndex + 1} / {total}
+      </Text>
       <View style={themed($headerActions)}>
         <TouchableOpacity
           accessibilityLabel="Show media details"
@@ -660,14 +613,11 @@ const $headerActions: ThemedStyle<any> = () => ({
   alignItems: "center",
 })
 
-const $counter: ThemedStyle<any> = ({spacing}) => ({
+const $counterText: ThemedStyle<any> = ({colors, spacing}) => ({
   position: "absolute",
   left: 0,
   right: 0,
   bottom: spacing.s6,
-})
-
-const $counterText: ThemedStyle<any> = ({colors}) => ({
   color: colors.foreground,
   fontSize: 16,
   fontWeight: "600",

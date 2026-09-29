@@ -65,7 +65,6 @@ on:
       - "OEM Host Boundary Gate"
       - "Coordinated Release Family Checks"
       - "Bun Lockfile Checks"
-      - "Bluetooth SDK Apple Platforms"
       - "Cloud V2 Validation"
     types: [completed]
 
@@ -119,7 +118,6 @@ jobs:
               "OEM Host Boundary Gate",
               "Coordinated Release Family Checks",
               "Bun Lockfile Checks",
-              "Bluetooth SDK Apple Platforms",
               "Cloud V2 Validation",
             ]);
 

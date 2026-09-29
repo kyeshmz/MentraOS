@@ -164,7 +164,7 @@ object TTSTools {
                 saved
             } catch (e: Exception) {
                 Bridge.log("TTS_ERROR: ${e.javaClass.simpleName}: ${e.message}")
-                com.mentra.bluetoothsdk.utils.NativeLog.e("TTSTools", "Native exception", e)
+                e.printStackTrace()
                 false
             } finally {
                 scheduleIdleTeardownLocked()

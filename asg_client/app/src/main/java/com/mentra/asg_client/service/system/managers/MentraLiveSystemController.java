@@ -46,14 +46,7 @@ public class MentraLiveSystemController implements ISystemController {
 
     @Override
     public void setEisEnabled(boolean enable) {
-        Log.i(
-                TAG,
-                "EIS stage=vendor-property enable="
-                        + enable
-                        + " pixsmart.vs="
-                        + (enable ? "1" : "0")
-                        + " morpho.videoeis.mode="
-                        + (enable ? "1" : "0"));
+        Log.d(TAG, "Setting EIS to: " + (enable ? "ENABLED" : "DISABLED"));
         Intent pixsmart = new Intent();
         pixsmart.putExtra("cmd", "setProperty");
         pixsmart.putExtra("name", "vendor.debug.pixsmart.vs");

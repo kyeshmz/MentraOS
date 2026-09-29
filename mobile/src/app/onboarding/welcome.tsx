@@ -1,4 +1,5 @@
-import {DeviceTypes, SETTINGS, useSetting} from "@mentra/engine"
+import {DeviceTypes} from "@mentra/engine"
+import {SETTINGS, useSetting} from "@mentra/engine"
 import {Image, TouchableOpacity, useWindowDimensions, View} from "react-native"
 import type {ImageSourcePropType, ImageStyle, ViewStyle} from "react-native"
 
@@ -6,7 +7,6 @@ import {MentraLogoStandalone} from "@/components/brands/MentraLogoStandalone"
 import {Screen, Text} from "@/components/ignite"
 import GlassView from "@/components/ui/GlassView"
 import type {TxKeyPath} from "@/i18n"
-import {isGlassesModelAllowedByDeployment} from "@/services/deployment/glassesPolicy"
 import {useNavigationStore} from "@/stores/navigation"
 
 const CardButton = ({
@@ -51,7 +51,6 @@ const CardButton = ({
 export default function OnboardingWelcome() {
   const {push} = useNavigationStore.getState()
   const [_onboarding, setOnboardingCompleted] = useSetting(SETTINGS.onboarding_completed.key)
-  const simulatedGlassesAllowed = isGlassesModelAllowedByDeployment(DeviceTypes.SIMULATED)
 
   // User has smart glasses - go to glasses selection screen
   const handleHasGlasses = async () => {
@@ -96,19 +95,15 @@ export default function OnboardingWelcome() {
         testID="onboarding-setup-with-glasses"
         tx="onboarding:setupWithGlasses"
       />
-      {simulatedGlassesAllowed && (
-        <>
-          <View className="h-12" />
-          <CardButton
-            imageHeight={189}
-            imageSource={require("@assets/onboarding/welcome/phone.png")}
-            imageWidth={130}
-            onPress={handleNoGlasses}
-            testID="onboarding-setup-without-glasses"
-            tx="onboarding:setupWithoutGlasses"
-          />
-        </>
-      )}
+      <View className="h-12" />
+      <CardButton
+        imageHeight={189}
+        imageSource={require("@assets/onboarding/welcome/phone.png")}
+        imageWidth={130}
+        onPress={handleNoGlasses}
+        testID="onboarding-setup-without-glasses"
+        tx="onboarding:setupWithoutGlasses"
+      />
     </Screen>
   )
 }

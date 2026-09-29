@@ -27,7 +27,6 @@ export function prepareCompatibilityLabPlan({root, record, previousPlan}) {
     sourceCommit: record.coordinates.currentMentraApp.sourceCommit,
     nativeBuildNumber: buildNumber,
     otaInputs: previousPlan.otaInputs,
-    playTrack: "internal-app-sharing",
   })
   plan.compatibilityLab = {
     promotionId: record.promotionId,

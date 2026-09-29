@@ -49,9 +49,6 @@ export const mentraLocalNetworkMock = {
 }
 
 export const bluetoothSdkMock = {
-  configureNativeNotifications: jest.fn(() => Promise.resolve()),
-  getNativeNotificationStatus: jest.fn(() => Promise.resolve({supported: false, state: "unavailable"})),
-  sendPhoneNotification: jest.fn(() => Promise.resolve()),
   addListener,
   isConnectedGlassesConnectionStatus,
   isReadyGlassesConnectionStatus,
@@ -133,7 +130,6 @@ export const bluetoothSdkMock = {
   ping: jest.fn(() => Promise.resolve()),
   sendIncidentId: jest.fn(() => Promise.resolve()),
   requestWifiScan: jest.fn(() => Promise.resolve([])),
-  getSavedWifiNetworks: jest.fn(() => Promise.resolve([])),
   sendWifiCredentials: jest.fn((ssid: string) =>
     Promise.resolve({type: "wifi_status_change", state: "connected", ssid}),
   ),

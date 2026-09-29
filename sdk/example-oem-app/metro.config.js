@@ -1,6 +1,5 @@
 // Learn more https://docs.expo.io/guides/customizing-metro
 const {getDefaultConfig} = require("expo/metro-config")
-const fs = require("fs")
 const path = require("path")
 
 const projectRoot = __dirname
@@ -27,14 +26,7 @@ const cloudPackagesRoot = path.resolve(repoRoot, "cloud-v2", "packages")
 // cloud-v2/node_modules/.bun/*, not anywhere under cloudPackagesRoot.
 const cloudNodeModulesRoot = path.resolve(repoRoot, "cloud-v2", "node_modules")
 
-// Only watch folders that exist. Metro's verifyRootExists() throws ENOENT on a
-// missing watchFolder, which kills the release bundle outright. A workspace's
-// node_modules is only on disk once that workspace has been installed, and the
-// OEM APK CI job installs `sdk` alone (engine and the cloud packages are `sdk`
-// workspace members, so their deps land in sdk/node_modules/.bun instead).
-config.watchFolders = [sdkRoot, modulesRoot, mobileNodeModulesRoot, cloudPackagesRoot, cloudNodeModulesRoot].filter(
-  (folder) => fs.existsSync(folder),
-)
+config.watchFolders = [sdkRoot, modulesRoot, mobileNodeModulesRoot, cloudPackagesRoot, cloudNodeModulesRoot]
 
 config.resolver.extraNodeModules = {
   ...(config.resolver.extraNodeModules ?? {}),

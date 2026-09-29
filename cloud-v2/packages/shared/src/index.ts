@@ -3,8 +3,12 @@
  * across the core, audio, and proxy packages.
  */
 
-export {createLogger, type Logger} from "./logger"
-export {createHealthApp, type HealthAppOptions, type ReadinessCheck} from "./health"
+export { createLogger, type Logger } from "./logger";
+export {
+  createHealthApp,
+  type HealthAppOptions,
+  type ReadinessCheck,
+} from "./health";
 export {
   verifyAccessTokenSignature,
   assertRuntimeAuthConfigured,
@@ -14,8 +18,6 @@ export {
   resetMentraKeyCache,
   resetRuntimeAuthCache,
   type VerifiedAccessToken,
-  type FederatedIdentity,
-} from "./auth"
-export {verifyOidcToken, resetOidcVerifierCache, OidcTokenError, type OidcProviderConfig} from "./oidc"
+} from "./auth";
 
-export const PACKAGE_NAME = "@mentra/cloud-shared"
+export const PACKAGE_NAME = "@mentra/cloud-shared";

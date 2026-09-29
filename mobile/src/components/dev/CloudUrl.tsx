@@ -6,9 +6,6 @@ import GlassView from "@/components/ui/GlassView"
 import {useAppTheme} from "@/contexts/ThemeContext"
 import {SETTINGS, useSetting} from "@mentra/engine"
 import {cloudClient, resolvedEndpoints} from "@/services/cloudClient"
-import {translate} from "@/i18n"
-import {deploymentStore, useDeployment} from "@/services/deployment"
-import {deploymentDebugOverrides, saveDeploymentCloudOverrides} from "@/services/deployment/debugOverrides"
 import {devServerHost, METRO_AUTO} from "@/utils/cloudClient/devHost"
 import showAlert from "@/utils/AlertUtils"
 
@@ -69,11 +66,8 @@ async function testEndpoint(url: string): Promise<{ok: boolean; status?: number;
 
 export default function CloudUrl() {
   const {theme} = useAppTheme()
-  useSetting(SETTINGS.cloud_core_url.key)
-  useSetting(SETTINGS.cloud_runtime_url.key)
-  useSetting(SETTINGS.cloud_url_deployment.key)
-  const {activeDeployment} = useDeployment()
-  const {core: coreUrl, runtime: runtimeUrl} = deploymentDebugOverrides(activeDeployment)
+  const [coreUrl, setCoreUrl] = useSetting(SETTINGS.cloud_core_url.key)
+  const [runtimeUrl, setRuntimeUrl] = useSetting(SETTINGS.cloud_runtime_url.key)
   const [coreInput, setCoreInput] = useState("")
   const [runtimeInput, setRuntimeInput] = useState("")
   const [isSaving, setIsSaving] = useState(false)
@@ -149,32 +143,23 @@ export default function CloudUrl() {
       // Persist what the user chose, not what it resolved to: saving the
       // METRO_AUTO sentinel is what lets "my laptop" keep working when the
       // laptop's LAN IP changes — resolution happens live on every connect.
-      // A health probe may finish after the user switches organizations.
-      if (activeDeployment !== deploymentStore.getActive()) return
-      await saveDeploymentCloudOverrides(activeDeployment, {core, runtime})
+      await setCoreUrl(core)
+      await setRuntimeUrl(runtime)
       cloudClient.reconnect()
 
       showAlert("Success", "Cloud V2 endpoints saved and verified. Reconnecting with the new URLs.", [{text: "OK"}])
-    } catch (error) {
-      showAlert(translate("common:error"), error instanceof Error ? error.message : String(error), [{text: "OK"}])
     } finally {
       setIsSaving(false)
     }
   }
 
-  const handleReset = async () => {
-    setIsSaving(true)
-    try {
-      await saveDeploymentCloudOverrides(activeDeployment, {core: "", runtime: ""})
-      setCoreInput("")
-      setRuntimeInput("")
-      cloudClient.reconnect()
-      showAlert("Success", translate("workspace:cloudReset"), [{text: "OK"}])
-    } catch (error) {
-      showAlert(translate("common:error"), error instanceof Error ? error.message : String(error), [{text: "OK"}])
-    } finally {
-      setIsSaving(false)
-    }
+  const handleReset = () => {
+    setCoreUrl(null)
+    setRuntimeUrl(null)
+    setCoreInput("")
+    setRuntimeInput("")
+    cloudClient.reconnect()
+    showAlert("Success", "Reset Cloud V2 endpoints to env/default.", [{text: "OK"}])
   }
 
   const applyPreset = (core: string, runtime: string) => {
@@ -226,13 +211,11 @@ export default function CloudUrl() {
       <View className="flex-1">
         <Text className="flex-wrap text-base text-foreground">Cloud V2</Text>
         <Text className="mt-1 flex-wrap text-xs text-muted-foreground">
-          {translate("workspace:cloudOverridesDescription", {name: activeDeployment.manifest.displayName})}
+          New audio/captions cloud; the v1 backend URL above is the legacy cloud. Override the Cloud V2 core and runtime
+          endpoints. Leave blank to use env/default.
         </Text>
 
         <Text className="mt-3.5 text-[13px] font-semibold text-foreground">Core URL</Text>
-        <Text className="mt-1 text-xs text-muted-foreground">
-          {translate("workspace:cloudDefault", {url: activeDeployment.manifest.services.coreUrl ?? ""})}
-        </Text>
         <Text className="mt-1 flex-wrap text-xs text-muted-foreground">
           Currently using: {active.core}
           {describeOverride(coreUrl)}
@@ -250,9 +233,6 @@ export default function CloudUrl() {
         />
 
         <Text className="mt-3.5 text-[13px] font-semibold text-foreground">Runtime URL</Text>
-        <Text className="mt-1 text-xs text-muted-foreground">
-          {translate("workspace:cloudDefault", {url: activeDeployment.manifest.services.runtimeUrl ?? ""})}
-        </Text>
         <Text className="mt-1 flex-wrap text-xs text-muted-foreground">
           Currently using: {active.runtime}
           {describeOverride(runtimeUrl)}

@@ -27,7 +27,7 @@ import android.bluetooth.le.ScanSettings
 import android.os.Message
 import android.os.Handler
 import android.os.Looper
-import com.mentra.bluetoothsdk.utils.NativeLog as Log
+import android.util.Log
 import android.content.Context
 
 import mentraos.ble.MentraosBle.GlassesToPhone
@@ -208,7 +208,7 @@ class MentraNex : SGCManager() {
 
             // If we already have saved device names for main...
             if (name != null && preferredMainDeviceId != null) {
-                if (name != preferredMainDeviceId) {
+                if (!name.contains(preferredMainDeviceId!!)) {
                     return // Not a matching device
                 }
             }
@@ -230,6 +230,7 @@ class MentraNex : SGCManager() {
         type = DeviceTypes.NEX
         hasMic = true
         DeviceStore.apply("glasses", "micEnabled", false)
+        preferredMainDeviceId = DeviceManager.getInstance().deviceName
         
         // Initialize LC3 audio player
         lc3AudioPlayer = Lc3Player(context)
@@ -1314,28 +1315,23 @@ class MentraNex : SGCManager() {
     }
 
     private fun connectToSmartGlasses() {
-        val target = preferredMainDeviceId?.takeIf { it.isNotBlank() } ?: return
-        val deviceAddress = SelectedDeviceAddress.resolve(
-            target,
-            DeviceStore.get("bluetooth", "pending_device_name") as? String,
-            DeviceStore.get("bluetooth", "pending_device_address") as? String,
-            DeviceStore.get("bluetooth", "device_name") as? String,
-            DeviceStore.get("bluetooth", "device_address") as? String,
-        )
+        val deviceModelName = DeviceManager.getInstance().deviceName
+        val deviceAddress = DeviceManager.getInstance().deviceAddress
 
         // Register bonding receiver
         Bridge.log("connectToSmartGlasses start")
-        Bridge.log("Connecting to selected Nex: $target address: $deviceAddress")
+        Bridge.log("try to ConnectToSmartGlassesing deviceModelName: ${deviceModelName} deviceAddress: ${deviceAddress}")
+        preferredMainDeviceId = DeviceManager.getInstance().deviceName
         if (!bluetoothAdapter.isEnabled) {
             return
         }
         when {
-            deviceAddress != null -> {
+            !deviceModelName.isNullOrEmpty() && !deviceAddress.isNullOrEmpty() -> {
                 stopScan()
                 mainDevice = bluetoothAdapter.getRemoteDevice(deviceAddress)
                 mainTaskHandler?.sendEmptyMessageDelayed(MAIN_TASK_HANDLER_CODE_RECONNECT_DEVICE, 0)
             }
-            savedNexMainName == target && savedNexMainAddress != null -> {
+            savedNexMainAddress != null -> {
                 mainDevice = bluetoothAdapter.getRemoteDevice(savedNexMainAddress)
                 mainTaskHandler?.sendEmptyMessageDelayed(MAIN_TASK_HANDLER_CODE_RECONNECT_DEVICE, 0)
             }

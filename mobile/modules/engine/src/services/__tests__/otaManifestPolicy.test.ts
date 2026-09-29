@@ -1,10 +1,6 @@
 import {describe, expect, test} from "bun:test"
 
-import {
-  resolveDeploymentAwareOtaManifestPolicy,
-  resolveOtaManifestPolicy,
-  selectModernOtaManifestPin,
-} from "../otaManifestPolicy"
+import {resolveOtaManifestPolicy, selectModernOtaManifestPin} from "../otaManifestPolicy"
 
 describe("OTA manifest policy", () => {
   test("uses explicit modern pins in developer, host, then Engine order", () => {
@@ -42,30 +38,5 @@ describe("OTA manifest policy", () => {
     expect(resolveOtaManifestPolicy({glassesBuildNumber: "36"})).toBe(
       "https://ota.mentraglass.com/prod_live_version.json",
     )
-  })
-
-  test("treats an explicit deployment null as OTA disabled for legacy glasses", () => {
-    expect(
-      resolveDeploymentAwareOtaManifestPolicy({
-        hostPolicyConfigured: true,
-        hostReleasePin: null,
-        glassesBuildNumber: "36",
-        glassesUrl: "https://ota.mentraglass.com/device-reported.json",
-        engineReleasePin: "https://ota.mentraglass.com/embedded.json",
-      }),
-    ).toBeNull()
-  })
-
-  test("applies an enabled developer override ahead of workspace OTA policy", () => {
-    for (const hostReleasePin of [null, "https://organization.example/ota.json"]) {
-      expect(
-        resolveDeploymentAwareOtaManifestPolicy({
-          hostPolicyConfigured: true,
-          hostReleasePin,
-          developerOverride: "https://debug.example/ota.json",
-          glassesBuildNumber: "36",
-        }),
-      ).toBe("https://debug.example/ota.json")
-    }
   })
 })

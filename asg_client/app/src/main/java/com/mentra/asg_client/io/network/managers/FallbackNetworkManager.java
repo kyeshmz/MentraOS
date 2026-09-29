@@ -13,7 +13,6 @@ import android.provider.Settings;
 import android.util.Log;
 import com.mentra.asg_client.io.network.core.BaseNetworkManager;
 import com.mentra.asg_client.io.network.interfaces.IWifiScanCallback;
-import com.mentra.asg_client.io.network.interfaces.WifiForgetOutcome;
 import com.mentra.asg_client.io.network.utils.DebugNotificationManager;
 import com.mentra.asg_client.service.utils.DeviceProfile;
 import java.util.ArrayList;
@@ -247,18 +246,12 @@ public class FallbackNetworkManager extends BaseNetworkManager {
     }
 
     @Override
-    public WifiForgetOutcome forgetWifiNetwork(String ssid) {
+    public void forgetWifiNetwork(String ssid) {
         Log.d(TAG, "Forgetting WiFi network: " + ssid);
         // Fallback to manual WiFi forget
         notificationManager.showDebugNotification(
                 "Manual WiFi Forget", "Please forget network '" + ssid + "' via system settings");
         Log.d(TAG, "Manual WiFi forget prompt shown for: " + ssid);
-        return WifiForgetOutcome.UNSUPPORTED;
-    }
-
-    @Override
-    public int getSavedWifiNetworksVersion() {
-        return 0;
     }
 
     private void promptDisconnectFromWifi() {

@@ -6,10 +6,8 @@
 //  Used to detect when Mentra Live glasses are paired/connected for audio
 //
 
-import Foundation
-
-#if !os(macOS)
 import AVFoundation
+import Foundation
 import UIKit
 
 class AudioSessionMonitor {
@@ -58,14 +56,11 @@ class AudioSessionMonitor {
         Bridge.log("AudioMonitor: Checking active route, output count: \(outputs.count)")
         for output in outputs {
             Bridge.log("AudioMonitor:   - \(output.portName) (type: \(output.portType.rawValue))")
-            if BluetoothAudioRoute.matches(
-                name: output.portName,
-                portType: output.portType.rawValue,
-                target: devicePattern,
-                isIOSAppOnMac: ProcessInfo.processInfo.isiOSAppOnMac
-            ) {
-                Bridge.log("AudioMonitor: ✅ Found active audio device: \(output.portName)")
-                return true
+            if output.portType == .bluetoothHFP || output.portType == .bluetoothA2DP {
+                if output.portName.localizedCaseInsensitiveContains(devicePattern) {
+                    Bridge.log("AudioMonitor: ✅ Found active audio device: \(output.portName)")
+                    return true
+                }
             }
         }
 
@@ -284,16 +279,5 @@ class AudioSessionMonitor {
                 )
             }
         }
-    }
-}
-#endif
-
-/// AVAudioSession preserves the route name on iOS-on-Mac but reports the
-/// CoreAudio transport "Bluetooth" instead of iPhone's profile-specific port.
-enum BluetoothAudioRoute {
-    static func matches(name: String, portType: String, target: String, isIOSAppOnMac: Bool) -> Bool {
-        guard !target.isEmpty, name.localizedCaseInsensitiveContains(target) else { return false }
-        return portType == "BluetoothHFP" || portType == "BluetoothA2DPOutput"
-            || (isIOSAppOnMac && portType == "Bluetooth")
     }
 }

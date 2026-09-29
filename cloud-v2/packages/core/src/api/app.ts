@@ -28,11 +28,6 @@ import { AccountError } from "../services/account/account-error";
 import { requestContext } from "./middleware/context.middleware";
 import adminPreinstalled from "./admin/preinstalled.api";
 import reportAgent from "./agent/reports.api";
-import testFailureAgent from "./agent/test-failures.api";
-import testRunIngest from "./internal/test-runs.api";
-import testRunClaims from "./internal/test-run-claims.api";
-import testResourceObservations from "./internal/test-resource-observations.api";
-import testHostObservations from "./internal/test-host-observations.api";
 import clientAuth from "./client/auth.api";
 import clientReports from "./client/reports.api";
 import clientSupportProfile from "./client/support-profile.api";
@@ -70,9 +65,10 @@ export function createApp(opts: CreateAppOptions): Hono<AppEnv> {
   // Per-request context (reqId, logger) for everything under /api/*.
   app.use("/api/*", requestContext);
 
-  // Legacy minimum-client-version gate for already-released mobile clients.
-  // New clients use Runtime's copy. Keep this route until those releases no
-  // longer need compatibility with Core.
+  // Minimum-client-version gate. Device-called, unauthenticated: the mobile
+  // app hits this on boot (RestComms.getMinimumClientVersion) before login and
+  // refuses to proceed if it can't reach it. Versions are config-driven and
+  // default to "0.0.0" so any build passes unless an operator pins a floor.
   app.get("/api/client/min-version", (c) =>
     c.json({
       success: true,
@@ -88,11 +84,6 @@ export function createApp(opts: CreateAppOptions): Hono<AppEnv> {
   app.route("/api/client/reports", clientReports);
   app.route("/api/client/support-profile", clientSupportProfile);
   app.route("/api/agent/reports", reportAgent);
-  app.route("/api/agent/test-failures", testFailureAgent);
-  app.route("/api/internal/test-runs", testRunIngest);
-  app.route("/api/internal/test-run-claims", testRunClaims);
-  app.route("/api/internal/test-resource-observations", testResourceObservations);
-  app.route("/api/internal/test-host-observations", testHostObservations);
   app.route("/api/client/miniapps", clientMiniapps);
   app.route("/api/account", accountApi);
   app.route("/api/account/oauth", accountOauth);

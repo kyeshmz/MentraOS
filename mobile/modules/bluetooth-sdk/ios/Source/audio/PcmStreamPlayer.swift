@@ -1,6 +1,5 @@
 import AVFoundation
 import Foundation
-import os
 
 private enum PcmStreamError: LocalizedError {
     case invalidArgument(String)
@@ -26,7 +25,6 @@ private enum PcmStreamError: LocalizedError {
 /// recovery, close, and abort deterministic without blocking Expo's module
 /// queue.
 final class PcmStreamPlayer: @unchecked Sendable {
-    private let logger = Logger(subsystem: "com.mentra.pcm-stream", category: "playback")
     private static let backpressureCeilingMs: Int64 = 2000
     private static let maximumBacklogMs: Int64 = 10000
 
@@ -39,7 +37,6 @@ final class PcmStreamPlayer: @unchecked Sendable {
 
     private var queuedFrames: Int64 = 0
     private var playedFrames: Int64 = 0
-    private var writtenFrames: Int64 = 0
     private var closing = false
     private var aborted = false
     private var finished = false
@@ -110,10 +107,6 @@ final class PcmStreamPlayer: @unchecked Sendable {
                     }
 
                     let buffer = try makeBuffer(data: data, frameCount: frameCount)
-                    if writtenFrames == 0 {
-                        logger.info("PCM_PLAYBACK first_write frames=\(frameCount) sampleRate=\(self.sampleRate) engineRunning=\(self.engine.isRunning)")
-                    }
-                    writtenFrames += Int64(frameCount)
                     queuedFrames += Int64(frameCount)
                     player.scheduleBuffer(
                         buffer,
@@ -164,7 +157,6 @@ final class PcmStreamPlayer: @unchecked Sendable {
         await withCheckedContinuation { continuation in
             stateQueue.async { [self] in
                 if !aborted {
-                    logger.info("PCM_PLAYBACK abort writtenFrames=\(self.writtenFrames) playedFrames=\(self.playedFrames) queuedFrames=\(self.queuedFrames)")
                     aborted = true
                     finished = true
                     player.stop()
@@ -209,10 +201,6 @@ final class PcmStreamPlayer: @unchecked Sendable {
 
     private func didPlay(frameCount: Int) {
         guard !aborted, terminalError == nil else { return }
-        if playedFrames == 0 {
-            let rate = sampleRate
-            logger.info("PCM_PLAYBACK first_played frames=\(frameCount) sampleRate=\(rate)")
-        }
         queuedFrames = max(0, queuedFrames - Int64(frameCount))
         playedFrames += Int64(frameCount)
 
@@ -273,17 +261,6 @@ final class PcmStreamPlayer: @unchecked Sendable {
 
     private func installAudioSessionObservers() {
         let center = NotificationCenter.default
-        #if os(macOS)
-        observers.append(center.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
-        ) { [weak self] _ in
-            self?.stateQueue.async {
-                // A device change invalidates scheduled buffers. Reject pending writes/close
-                // instead of leaving callers waiting for callbacks that cannot arrive.
-                self?.fail(PcmStreamError.native("Audio device changed; reopen the PCM stream"))
-            }
-        })
-        #else
         observers.append(
             center.addObserver(
                 forName: AVAudioSession.interruptionNotification,
@@ -317,7 +294,6 @@ final class PcmStreamPlayer: @unchecked Sendable {
                 }
             }
         )
-        #endif
     }
 
     private func removeAudioSessionObservers() {
@@ -325,7 +301,6 @@ final class PcmStreamPlayer: @unchecked Sendable {
         observers.removeAll()
     }
 
-    #if !os(macOS)
     private func handleInterruption(_ notification: Notification) {
         guard
             let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
@@ -346,7 +321,6 @@ final class PcmStreamPlayer: @unchecked Sendable {
             break
         }
     }
-    #endif
 }
 
 /// Process-wide registry matching the Android PCM stream bridge contract.

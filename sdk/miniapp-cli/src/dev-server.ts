@@ -17,7 +17,7 @@
 // fetch ships current code.
 
 import {readdirSync, readFileSync, statSync, watch} from "fs"
-import {join, relative, sep} from "path"
+import {join, relative} from "path"
 import JSZip from "jszip"
 import type {ServerWebSocket} from "bun"
 
@@ -27,13 +27,6 @@ export interface DevServerOptions {
   watchDir: string
   /** Suppress info console.log output. Default false. */
   silent?: boolean
-  /**
-   * Watch the project and broadcast `{reload|respawn-bg}` to connected
-   * phones. Default true. When false the sidecar still forwards console
-   * logs and serves `bundle.zip`; it just does not remount the WebView
-   * or respawn the background JSContext on save.
-   */
-  hotReload?: boolean
   /**
    * Hook run inside the debounced broadcast window, after the filesystem
    * settles but before the phone is notified. Two-layer projects use this
@@ -114,39 +107,6 @@ function fmtTime(ts: number): string {
   const mm = String(d.getMinutes()).padStart(2, "0")
   const ss = String(d.getSeconds()).padStart(2, "0")
   return `${hh}:${mm}:${ss}`
-}
-
-// True when a path either equals `name` or sits under `name/`. macOS
-// FSEvents under `recursive: true` emits the bare directory name when
-// the directory itself is rm-rf'd or renamed; matching only `name/`
-// would let that event through and cause a rebuild loop.
-const isUnder = (filename: string, name: string): boolean =>
-  filename === name || filename.startsWith(`${name}/`) || filename.includes(`/${name}/`)
-
-/**
- * Decide what a filesystem watcher event should trigger: `respawn-bg` for a
- * change under `src/background/`, `reload` for any other project file, or
- * `ignore` for build output and dependency churn.
- */
-export function classifyWatchEvent(filename: string, separator: string = sep): "ignore" | "reload" | "respawn-bg" {
-  // fs.watch reports paths with the platform separator (`src\background\index.ts`
-  // on Windows), while every check below matches on `/`.
-  const path = separator === "/" ? filename : filename.split(separator).join("/")
-  // macOS recursive FSEvents can report "." when the build removes and
-  // recreates dist/. Treat that as build-output churn; otherwise the dev
-  // server rebuilds in a tight loop.
-  if (path === ".") return "ignore"
-  // Skip noisy directories: most projects don't want to reload on
-  // node_modules or dist churn (the rebuild itself rewrites dist/,
-  // which would otherwise loop).
-  if (isUnder(path, "node_modules")) return "ignore"
-  if (isUnder(path, ".git")) return "ignore"
-  if (isUnder(path, "dist")) return "ignore"
-  if (isUnder(path, "build")) return "ignore" // pack/release zip output
-  if (isUnder(path, ".next")) return "ignore"
-
-  const touchedBackground = path.startsWith("src/background/") || path.includes("/src/background/")
-  return touchedBackground ? "respawn-bg" : "reload"
 }
 
 /**
@@ -253,16 +213,35 @@ export function startDevSidecar(options: DevServerOptions): {stop: () => void; p
   let reloadTimer: ReturnType<typeof setTimeout> | null = null
   let pendingType: "reload" | "respawn-bg" | null = null
   let suppressEventsUntil = 0
-  const hotReload = options.hotReload !== false
+  // True when a path either equals `name` or sits under `name/`. macOS
+  // FSEvents under `recursive: true` emits the bare directory name when
+  // the directory itself is rm-rf'd or renamed; matching only `name/`
+  // would let that event through and cause a rebuild loop.
+  const isUnder = (filename: string, name: string): boolean =>
+    filename === name || filename.startsWith(`${name}/`) || filename.includes(`/${name}/`)
 
-  const onWatch = (_event: string, filename: string | null): void => {
+  const watcher = watch(options.watchDir, {recursive: true}, (_event, filename) => {
     if (!filename) return
     if (Date.now() < suppressEventsUntil) return
+    // macOS recursive FSEvents can report "." when the build removes and
+    // recreates dist/. Treat that as build-output churn; otherwise the dev
+    // server rebuilds in a tight loop.
+    if (filename === ".") return
+    // Skip noisy directories — most projects don't want to reload on
+    // node_modules or dist churn (the rebuild itself rewrites dist/,
+    // which would otherwise loop).
+    if (isUnder(filename, "node_modules")) return
+    if (isUnder(filename, ".git")) return
+    if (isUnder(filename, "dist")) return
+    if (isUnder(filename, "build")) return // pack/release zip output
+    if (isUnder(filename, ".next")) return
+
     // Decide which layer the change touched. Order matters: a single batch
     // may hit both layers; if so, respawn-bg wins (it implies a full reload
     // anyway on the WebView side because background drives the UI state).
-    const nextType = classifyWatchEvent(filename)
-    if (nextType === "ignore") return
+    const touchedBackground =
+      filename.startsWith("src/background/") || filename.includes("/src/background/")
+    const nextType: "reload" | "respawn-bg" = touchedBackground ? "respawn-bg" : "reload"
     if (pendingType === "respawn-bg") {
       // already locked in to the heavier signal — leave it
     } else {
@@ -308,12 +287,7 @@ export function startDevSidecar(options: DevServerOptions): {stop: () => void; p
         log(`${COLOR.cyan}${verb}${COLOR.reset} ${COLOR.dim}${filename}${COLOR.reset}`)
       }
     }, RELOAD_DEBOUNCE_MS)
-  }
-
-  const watcher = hotReload ? watch(options.watchDir, {recursive: true}, onWatch) : null
-  if (!hotReload) {
-    log(`${COLOR.dim}[__mentra_dev]${COLOR.reset} hot reload off — console bridge only`)
-  }
+  })
 
   log(`${COLOR.dim}[__mentra_dev]${COLOR.reset} sidecar listening on :${options.port}`)
 
@@ -321,7 +295,7 @@ export function startDevSidecar(options: DevServerOptions): {stop: () => void; p
     port: options.port,
     stop() {
       try {
-        watcher?.close()
+        watcher.close()
       } catch {
         /* ignore */
       }

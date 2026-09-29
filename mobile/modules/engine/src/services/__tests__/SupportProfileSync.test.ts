@@ -32,9 +32,7 @@ mock.module("expo-constants", () => ({
   },
 }))
 mock.module("expo-device", () => ({modelName: "iPhone 17 Pro"}))
-import {reactNative} from "./reactNativeTestMock"
-
-reactNative.Platform = {OS: "ios", Version: "26.0"}
+mock.module("react-native", () => ({Platform: {OS: "ios", Version: "26.0"}}))
 mock.module("../../stores/glasses", () => ({
   useGlassesStore: {
     getState: () => glassesState,
@@ -62,9 +60,9 @@ mock.module("../../utils/timers", () => ({
     clearTimeout: mock((id: number) => timeoutCallbacks.delete(id)),
   },
 }))
-import {cloudClientService} from "./cloudClientServiceTestMock"
-
-cloudClientService.core = {supportProfile: {update: updateMock}}
+mock.module("../CloudClientService", () => ({
+  cloudClientService: {core: {supportProfile: {update: updateMock}}},
+}))
 
 const {
   buildSnapshot,

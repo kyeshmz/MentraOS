@@ -15,8 +15,6 @@ import android.os.Looper;
 import android.util.Log;
 import com.mentra.asg_client.io.network.core.BaseNetworkManager;
 import com.mentra.asg_client.io.network.interfaces.IWifiScanCallback;
-import com.mentra.asg_client.io.network.interfaces.SavedWifiNetworksResult;
-import com.mentra.asg_client.io.network.interfaces.WifiForgetOutcome;
 import com.mentra.asg_client.io.network.utils.DebugNotificationManager;
 import com.mentra.asg_client.io.network.utils.HotspotLandingPage;
 import com.mentra.asg_client.io.network.utils.HotspotSetupRequestParser;
@@ -64,18 +62,8 @@ public class SystemNetworkManager extends BaseNetworkManager {
      * @param notificationManager The notification manager to use
      */
     public SystemNetworkManager(Context context, DebugNotificationManager notificationManager) {
-        this(
-                context,
-                notificationManager,
-                (WifiManager) context.getSystemService(Context.WIFI_SERVICE));
-    }
-
-    SystemNetworkManager(
-            Context context,
-            DebugNotificationManager notificationManager,
-            WifiManager wifiManager) {
         super(context);
-        this.wifiManager = wifiManager;
+        this.wifiManager = (WifiManager) context.getSystemService(Context.WIFI_SERVICE);
         this.notificationManager = notificationManager;
 
         notificationManager.showDebugNotification(
@@ -288,7 +276,7 @@ public class SystemNetworkManager extends BaseNetworkManager {
     }
 
     @Override
-    public WifiForgetOutcome forgetWifiNetwork(String ssid) {
+    public void forgetWifiNetwork(String ssid) {
         Log.d(TAG, "Forgetting WiFi network: " + ssid);
 
         try {
@@ -297,25 +285,22 @@ public class SystemNetworkManager extends BaseNetworkManager {
                 Log.w(TAG, "Android 10+ has limited WiFi forget capabilities");
                 notificationManager.showDebugNotification(
                         "WiFi Forget", "Please forget '" + ssid + "' manually via system settings");
-                return WifiForgetOutcome.UNSUPPORTED;
             } else {
                 // Legacy Android - can remove network programmatically
-                return forgetWifiLegacy(ssid);
+                forgetWifiLegacy(ssid);
             }
         } catch (Exception e) {
             Log.e(TAG, "Error forgetting WiFi network", e);
             notificationManager.showDebugNotification(
                     "WiFi Error", "Error forgetting WiFi network: " + e.getMessage());
-            return WifiForgetOutcome.FAILED;
         }
     }
 
     @SuppressLint("MissingPermission")
-    private WifiForgetOutcome forgetWifiLegacy(String ssid) {
+    private void forgetWifiLegacy(String ssid) {
         try {
             if (wifiManager != null) {
                 List<WifiConfiguration> configs = wifiManager.getConfiguredNetworks();
-                if (configs == null) return WifiForgetOutcome.FAILED;
                 if (configs != null) {
                     for (WifiConfiguration config : configs) {
                         if (config.SSID != null && config.SSID.equals("\"" + ssid + "\"")) {
@@ -329,22 +314,15 @@ public class SystemNetworkManager extends BaseNetworkManager {
                                 notificationManager.showDebugNotification(
                                         "WiFi Error", "Failed to forget network: " + ssid);
                             }
-                            return removed ? WifiForgetOutcome.CONFIRMED : WifiForgetOutcome.FAILED;
+                            return;
                         }
                     }
                 }
                 Log.w(TAG, "Network not found in saved networks: " + ssid);
-                return WifiForgetOutcome.NOT_FOUND;
             }
         } catch (Exception e) {
             Log.e(TAG, "Error forgetting WiFi network (legacy)", e);
         }
-        return WifiForgetOutcome.FAILED;
-    }
-
-    @Override
-    public int getSavedWifiNetworksVersion() {
-        return 1;
     }
 
     @SuppressLint("MissingPermission")
@@ -744,42 +722,25 @@ public class SystemNetworkManager extends BaseNetworkManager {
     @SuppressLint("MissingPermission")
     @Override
     public List<String> getConfiguredWifiNetworks() {
-        try {
-            return readConfiguredWifiNetworks();
-        } catch (Exception e) {
-            Log.e(TAG, "Error getting configured networks", e);
-            return new ArrayList<>();
-        }
-    }
-
-    @Override
-    public SavedWifiNetworksResult getSavedWifiNetworksResult() {
-        try {
-            return SavedWifiNetworksResult.confirmed(readConfiguredWifiNetworks());
-        } catch (Exception e) {
-            Log.e(TAG, "Error reliably listing configured networks", e);
-            return SavedWifiNetworksResult.failed("list_saved_networks_failed");
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private List<String> readConfiguredWifiNetworks() {
         List<String> networks = new ArrayList<>();
-        List<WifiConfiguration> configurations = wifiManager.getConfiguredNetworks();
-        if (configurations == null) {
-            throw new IllegalStateException("Unable to enumerate configured networks");
-        }
-        if (configurations != null) {
-            for (WifiConfiguration config : configurations) {
-                if (config.SSID != null) {
-                    String ssid = config.SSID;
-                    if (ssid.startsWith("\"") && ssid.endsWith("\"")) {
-                        ssid = ssid.substring(1, ssid.length() - 1);
+
+        try {
+            List<WifiConfiguration> configurations = wifiManager.getConfiguredNetworks();
+            if (configurations != null) {
+                for (WifiConfiguration config : configurations) {
+                    if (config.SSID != null) {
+                        String ssid = config.SSID;
+                        if (ssid.startsWith("\"") && ssid.endsWith("\"")) {
+                            ssid = ssid.substring(1, ssid.length() - 1);
+                        }
+                        networks.add(ssid);
                     }
-                    networks.add(ssid);
                 }
             }
+        } catch (Exception e) {
+            Log.e(TAG, "Error getting configured networks", e);
         }
+
         return networks;
     }
 

@@ -1,5 +1,4 @@
 #!/usr/bin/env zx
-import {runPodInstall} from "./cocoapods-install.mjs"
 import {setBuildEnv} from "./set-build-env.mjs"
 await setBuildEnv()
 
@@ -17,7 +16,7 @@ if (installOnly) {
   await $({stdio: "inherit"})`cp .env ios/.xcode.env.local`
 
   // Sync CocoaPods after prebuild so new native source files are compiled
-  await runPodInstall({cwd: "ios"})
+  await $({stdio: "inherit", cwd: "ios"})`pod install`
 }
 
 function isIphone(device) {

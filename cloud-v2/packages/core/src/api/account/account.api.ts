@@ -86,10 +86,7 @@ app.post(
     if (everywhere) {
       await revokeAllSessionsForUser({ mentraUserId: u.mentraUserId });
     } else {
-      await revokeSession({
-        sessionId: u.sessionId,
-        accessToken: { jti: u.accessTokenJti, expiresAt: u.accessTokenExpiresAt },
-      });
+      await revokeSession({ sessionId: u.sessionId });
     }
     return c.body(null, 204);
   },

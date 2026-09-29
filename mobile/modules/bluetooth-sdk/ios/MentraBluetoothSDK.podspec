@@ -12,8 +12,7 @@ Pod::Spec.new do |s|
   s.author         = package['author']
   s.homepage       = package['homepage']
   s.platforms      = {
-    :ios => '15.1',
-    :osx => '13.0'
+    :ios => '15.1'
   }
   s.swift_version  = '5.9'
   s.source         = {
@@ -24,10 +23,10 @@ Pod::Spec.new do |s|
 
   # External dependencies required by Bluetooth SDK native code
   s.dependency 'ExpoModulesCore' if include_expo_adapter
-  s.ios.dependency 'SWCompression', '~> 4.8.0'
-  s.ios.dependency 'SwiftProtobuf', '~> 1.0'
-  s.ios.dependency 'onnxruntime-objc', '1.18.0'
-  s.ios.dependency 'UltraliteSDK'
+  s.dependency 'SWCompression', '~> 4.8.0'
+  s.dependency 'SwiftProtobuf', '~> 1.0'
+  s.dependency 'onnxruntime-objc', '1.18.0'
+  s.dependency 'UltraliteSDK'
 
   # Swift/Objective-C compatibility
   s.pod_target_xcconfig = {
@@ -38,17 +37,15 @@ Pod::Spec.new do |s|
   }
 
   # iOS frameworks required by Bluetooth SDK
-  ios_frameworks = ['AVFoundation', 'CoreBluetooth', 'UIKit', 'CoreGraphics', 'ImageIO']
+  ios_frameworks = ['AVFoundation', 'CoreBluetooth', 'UIKit', 'CoreGraphics']
   ios_frameworks << 'Network' if include_expo_adapter
-  s.ios.frameworks = ios_frameworks
-  s.osx.frameworks = ['AVFoundation', 'CoreBluetooth', 'CoreAudio', 'AudioToolbox', 'ImageIO', 'JavaScriptCore', 'Network']
+  s.frameworks = ios_frameworks
 
   # System libraries required by MentraOS
-  s.ios.libraries = 'bz2', 'z'
-  s.osx.library = 'z'
+  s.library = 'bz2'
 
   # Vendored frameworks
-  s.ios.vendored_frameworks = 'Packages/SherpaOnnx/sherpa-onnx.xcframework'
+  s.vendored_frameworks = 'Packages/SherpaOnnx/sherpa-onnx.xcframework'
 
   s.resource_bundles = {
     'BluetoothSDKPrivacy' => ['Source/PrivacyInfo.xcprivacy']
@@ -63,7 +60,7 @@ Pod::Spec.new do |s|
     "Packages/SherpaOnnx/sherpa-onnx.xcframework/Headers/**/*.{h,hpp}",
     "Packages/libbz2/shim.h"
   ]
-  adapter_source_files = [
+  native_source_files.concat([
     "BluetoothSdkModule.swift",
     "LocalPhotoUploadServer.swift",
     "MentraPhotoReceiverModule.swift",
@@ -71,24 +68,8 @@ Pod::Spec.new do |s|
     "LocalOtaServer.swift",
     "BackgroundOtaArtifactDownloader.swift",
     "MentraOtaServerModule.swift"
-  ]
-  native_source_files.concat(adapter_source_files) if include_expo_adapter
-  s.ios.source_files = native_source_files
-  s.osx.source_files = [
-    'Source/**/*.{h,m,mm,swift,hpp,cpp,c}',
-    'Packages/CoreObjC/**/*.{h,m,mm,hpp,cpp,c}'
-  ] + (include_expo_adapter ? adapter_source_files : [])
-  s.osx.exclude_files = [
-    'Source/Bridging-Header.h',
-    'Source/sgcs/Mach1.swift',
-    'Source/sgcs/MentraNex.swift',
-    'Source/sgcs/mentraos_ble.pb.swift',
-    'Source/stt/**/*',
-    'Source/tts/**/*',
-    'Source/utils/TarBz2Extractor.swift',
-    'Source/BridgeModule.{h,m}',
-    'Source/Bridge.m'
-  ]
+  ]) if include_expo_adapter
+  s.source_files = native_source_files
 
   # Explicitly mark C++ headers and internal headers as private to prevent exposure in public interface
   s.private_header_files = [

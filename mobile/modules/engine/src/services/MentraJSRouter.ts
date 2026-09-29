@@ -23,9 +23,10 @@
  * Host-side handler bodies (display fan-out, mic state, transcription,
  * navigation, etc.) live untouched in `LocalMiniappRuntime.ts`.
  *
- * PhoneStreamCoordinator delivers stream status through LocalMiniappRuntime
- * to the miniapp's registered `sendMessage` callback, using the same local
- * bridge as other responses and events.
+ * Cloud-message routing (`phone_stream_status`, `phone_managed_stream_status`)
+ * goes straight through `LocalMiniappRuntime.handleCloudMessage` — nothing
+ * for the router to do; the responses arrive inside an envelope whose
+ * `sendMessage` was already registered via the same path here.
  *
  * The router also bridges native error / log / unhandled-rejection
  * events (`iface: "__log"`, `iface: "__error"`) into the standard
@@ -378,9 +379,9 @@ export class MentraJSRouter {
    * router gates this to registered packages and keeps LocalMiniappView from
    * reaching into runtime internals.
    */
-  probeForegroundLiveness(packageName: string, reason = "foreground-open", timeoutMs?: number): void {
+  probeForegroundLiveness(packageName: string, reason = "foreground-open"): void {
     if (!this.registered.has(packageName)) return
-    this.runtime.probeForegroundLiveness(packageName, reason, timeoutMs)
+    this.runtime.probeForegroundLiveness(packageName, reason)
   }
 
   // ----------------------------------------------------------------
@@ -468,13 +469,7 @@ export class MentraJSRouter {
     //    dead and let the host surface a "tap to retry" banner.
     if (iface === "__error") {
       const payload = this.tryParseArgs(msg.argsJson)
-      // ready_nack is a liveness probe, not a crash. Logging it at error
-      // painted WHIP-start queue delay as a Mentra-Call exception.
-      if (method === "ready_nack") {
-        this.logger.warn(`[${packageName}] ${method}`, payload)
-      } else {
-        this.logger.error(`[${packageName}] ${method}`, payload)
-      }
+      this.logger.error(`[${packageName}] ${method}`, payload)
       if (this.crashController) {
         // Only treat "exception" + "unhandledRejection" + "uncaught" as
         // crash signals. `console.error` calls also flow through the
@@ -550,8 +545,11 @@ export class MentraJSRouter {
 
   /**
    * Push a `kind="bridge"` envelope into the named JSContext's
-   * `globalThis.__deliver`. Used by the per-app `sendMessage` registered via
-   * {@link registerApp} to deliver runtime responses and events locally.
+   * `globalThis.__deliver`. Used both by the per-app `sendMessage`
+   * registered via {@link registerApp} and by ad-hoc callers (e.g.
+   * cloud-relayed stream-status responses route through
+   * `LocalMiniappRuntime.handleCloudMessage`, which then calls the
+   * `app.sendMessage(serialized)` registered above).
    */
   private dispatchBridgeRaw(packageName: string, raw: string): void {
     void this.crust.mentraJsDispatchToJs(packageName, {kind: "bridge", raw})

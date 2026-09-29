@@ -53,15 +53,13 @@ enum class ButtonPhotoSize(val value: String) {
 
 enum class PhotoCompression(val value: String) {
     NONE("none"),
-    LOW("low"),
     MEDIUM("medium"),
-    HIGH("high");
+    HEAVY("heavy");
 
     companion object {
         @JvmStatic
-        fun fromValue(value: Any?): PhotoCompression =
-            values().firstOrNull { it.value == value }
-                ?: throw IllegalArgumentException("Invalid photo compression $value. Expected none, low, medium, or high.")
+        fun fromValue(value: String?): PhotoCompression =
+            values().firstOrNull { it.value == value } ?: NONE
     }
 }
 
@@ -75,29 +73,10 @@ data class PhotoCaptureDefaults(
     val ispAnalogGain: String? = null,
     val aeExposureDivisor: Int? = null,
     val isoCap: Int? = null,
-    val compress: PhotoCompression? = null,
+    val compress: String? = null,
     val sound: Boolean? = null,
     val resetCaptureTuning: Boolean = false,
-) {
-    companion object {
-        @JvmStatic
-        fun fromMap(values: Map<String, Any?>): PhotoCaptureDefaults =
-            PhotoCaptureDefaults(
-                size = (values["size"] as? String)?.let { PhotoSize.fromValue(it) },
-                mfnr = values["mfnr"] as? Boolean,
-                zsl = values["zsl"] as? Boolean,
-                noiseReduction = values["noiseReduction"] as? Boolean,
-                edgeEnhancement = values["edgeEnhancement"] as? Boolean,
-                ispDigitalGain = (values["ispDigitalGain"] as? Number)?.toInt(),
-                ispAnalogGain = values["ispAnalogGain"] as? String,
-                aeExposureDivisor = (values["aeExposureDivisor"] as? Number)?.toInt(),
-                isoCap = (values["isoCap"] as? Number)?.toInt(),
-                compress = if (values.containsKey("compress")) PhotoCompression.fromValue(values["compress"]) else null,
-                sound = values["sound"] as? Boolean,
-                resetCaptureTuning = values["resetCaptureTuning"] as? Boolean == true,
-            )
-    }
-}
+)
 
 data class VideoRecordingDefaults(
     val width: Int,
@@ -205,7 +184,7 @@ data class PhotoRequest @JvmOverloads constructor(
     val size: PhotoSize,
     val webhookUrl: String,
     val authToken: String? = null,
-    val compress: PhotoCompression = PhotoCompression.NONE,
+    val compress: PhotoCompression = PhotoCompression.MEDIUM,
     val save: Boolean = false,
     val sound: Boolean = true,
     /** Sensor exposure time for this capture only (ns), or null for auto exposure */
@@ -224,7 +203,6 @@ data class PhotoRequest @JvmOverloads constructor(
     val mode: PhotoMode = PhotoMode.PHOTO,
     /** `direct` disables BLE fallback; `ble` skips direct upload; `auto` tries both. */
     val transferMethod: String = "auto",
-    val presendThumbnail: Boolean = false,
 ) {
     companion object {
         private fun transferMethodFromValue(value: Any?): String {
@@ -241,7 +219,7 @@ data class PhotoRequest @JvmOverloads constructor(
 
         /** Mirrors iOS `BluetoothSdkModule` defaults for keys omitted from the JS bridge. */
         @JvmStatic
-        fun fromMap(values: Map<String, Any?>): PhotoRequest {
+        fun fromMap(values: Map<String, Any>): PhotoRequest {
             val rawExp = values["exposureTimeNs"] ?: values["exposure_time_ns"]
             val exposureTimeNs: Double? =
                 when (rawExp) {
@@ -271,12 +249,11 @@ data class PhotoRequest @JvmOverloads constructor(
                 size = PhotoSize.fromValue(stringValue(values, "size") ?: "medium"),
                 webhookUrl = stringValue(values, "webhookUrl", "webhook_url").orEmpty(),
                 authToken = stringValue(values, "authToken", "auth_token")?.takeIf { it.isNotBlank() },
-                compress = if (values.containsKey("compress")) PhotoCompression.fromValue(values["compress"]) else PhotoCompression.NONE,
+                compress = PhotoCompression.fromValue(stringValue(values, "compress") ?: "none"),
                 save = boolValue(values, "save", "saveToGallery") ?: false,
                 sound = boolValue(values, "sound") ?: true,
                 mode = PhotoMode.fromValue(stringValue(values, "mode")),
                 transferMethod = transferMethodFromValue(values["transferMethod"]),
-                presendThumbnail = boolValue(values, "presend_thumbnail") ?: false,
                 exposureTimeNs = exposureTimeNs,
                 iso = iso,
                 aeExposureDivisor = aeDivisor,
@@ -487,8 +464,6 @@ data class PhotoResponseEvent(
 data class PhotoStatusEvent(
     val values: Map<String, Any>,
 ) {
-    val thumbnailUrl: String? get() = stringValue(values, "thumbnailUrl")
-    val fileSizeBytes: Long? get() = longValue(values, "fileSizeBytes")
     val requestId: String get() = stringValue(values, "requestId").orEmpty()
     val status: String get() = stringValue(values, "status").orEmpty()
     val timestamp: Long get() = longValue(values, "timestamp") ?: System.currentTimeMillis()

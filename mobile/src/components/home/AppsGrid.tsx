@@ -1,5 +1,14 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react"
-import {Dimensions, FlatList, LayoutChangeEvent, Platform, Pressable, StyleSheet, View} from "react-native"
+import {
+  Dimensions,
+  FlatList,
+  LayoutChangeEvent,
+  Platform,
+  Pressable,
+  StyleSheet,
+  TouchableOpacity,
+  View,
+} from "react-native"
 import Animated, {
   cancelAnimation,
   Easing,
@@ -15,19 +24,7 @@ import {BlurView} from "expo-blur"
 import {Icon, Text} from "@/components/ignite"
 import AppIcon from "@/components/home/AppIcon"
 import {useAppTheme} from "@/contexts/ThemeContext"
-import {
-  DUMMY_APPLET,
-  HardwareType,
-  getAppsOrder,
-  saveAppsOrder,
-  sortAppsByPackageNamePriority,
-  engine,
-  type ClientApp,
-  type OrderMap,
-  useSetForeground,
-  useStart,
-  useStop,
-} from "@mentra/engine"
+import {DUMMY_APPLET, HardwareType, getAppsOrder, saveAppsOrder, sortAppsByPackageNamePriority, engine, type ClientApp, type OrderMap, useSetForeground, useStart, useStop} from "@mentra/engine"
 
 import {isOfflineHosted} from "@/components/miniapp/offlineHostedPackages"
 import {SYSTEM_APPS} from "@/constants/miniapps"
@@ -37,7 +34,6 @@ import {askPermissionsUI, checkPermissionsUI} from "@/utils/PermissionsUtils"
 import {SETTINGS, useSetting} from "@mentra/engine"
 import {storage} from "@/utils/storage"
 import {useNavigationStore} from "@/stores/navigation"
-import {setMiniappOpeningAnimation} from "@/stores/miniappLaunch"
 import {translate} from "@/i18n"
 import GlassView from "@/components/ui/GlassView"
 import {showAlert} from "@/contexts/ModalContext"
@@ -604,63 +600,22 @@ export function AppsGrid({
 
   const openApp = useCallback(
     async (app: ClientApp) => {
-      if (app.compatibility?.isCompatible === false) {
-        await showCompatibilityAlert(app)
-        return
-      }
+      if (await showCompatibilityAlert(app)) return
 
-      const usesOverlay = isOfflineHosted(app.packageName) || app.local
-      let opened = false
-      const openOverlay = () => {
-        opened = true
-        if (!engine.miniapps.list().some((a) => a.packageName === app.packageName && a.foregrounded)) {
-          setMiniappOpeningAnimation(app.packageName, showAllApps ? "expand" : "slide")
-        }
-        void setForeground(app.packageName)
-        onOpenApp?.(app)
-      }
-      const dismissFailedOpen = () => {
-        if (opened && engine.miniapps.list().some((a) => a.packageName === app.packageName && a.foregrounded)) {
-          engine.miniapps.clearForeground()
-        }
-      }
+      const started = app.running || (await startApplet(app, {skipNavigation: true}))
+      if (!started) return
 
-      try {
-        if (app.running && usesOverlay) {
-          openOverlay()
-          return
-        }
-
-        // Start the slide as soon as launch is accepted, before any bundle or runtime work.
-        const started =
-          app.running ||
-          (await startApplet(app, {
-            skipNavigation: true,
-            onAccepted: usesOverlay
-              ? () => {
-                  openOverlay()
-                  // Paint the slide before running-state updates and runtime startup.
-                  return new Promise<void>((resolve) =>
-                    requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-                  )
-                }
-              : undefined,
-          }))
-        if (!started) {
-          dismissFailedOpen()
-          return
-        }
-
-        if (!usesOverlay) {
-          if (app.offlineRoute) push(app.offlineRoute, {transition: "fade"})
-          onOpenApp?.(app)
-        }
-      } catch (error) {
-        dismissFailedOpen()
-        console.warn(`Failed to open miniapp ${app.packageName}:`, error)
+      if (isOfflineHosted(app.packageName) || app.local) {
+        await setForeground(app.packageName)
+      } else if (app.offlineRoute) {
+        push(app.offlineRoute, {transition: "fade"})
       }
+      // (Cloud V1 apps opened /applet/webview here; removed with Cloud V1 app
+      // end-of-life. Installed apps are local/offline-hosted.)
+
+      onOpenApp?.(app)
     },
-    [onOpenApp, push, setForeground, startApplet, showAllApps],
+    [onOpenApp, push, setForeground, startApplet],
   )
 
   const placeAppOnHome = useCallback(
@@ -765,7 +720,9 @@ export function AppsGrid({
       if (app.packageName.includes("@empty")) return // ignore dummy apps
       if (await showCompatibilityAlert(app)) return
 
-      // Check permissions before foregrounding the overlay.
+      // Overlay-hosted app types (local miniapps + offline-hosted built-ins) get
+      // their splash painted by foregrounding the Compositor overlay. Check
+      // permissions first so that splash never sits behind a permission prompt.
       const overlayForegrounded = app.local || isOfflineHosted(app.packageName)
       const neededPermissions = await checkPermissionsUI(app)
       if (neededPermissions.length > 0) {
@@ -774,12 +731,11 @@ export function AppsGrid({
       }
 
       if (overlayForegrounded) {
-        setMiniappOpeningAnimation(app.packageName, showAllApps ? "expand" : "slide")
         await setForeground(app.packageName)
       }
       await openApp(app)
     },
-    [openApp, setForeground, theme, showAllApps],
+    [openApp, setForeground, theme],
   )
 
   const showPopover = useCallback(
@@ -869,19 +825,9 @@ export function AppsGrid({
         return <View className="flex-1" />
       }
       return (
-        <Pressable
+        <TouchableOpacity
           ref={(ref) => {
             itemRefs.current[item.packageName] = ref
-          }}
-          accessibilityRole="button"
-          accessibilityLabel={item.name}
-          testID={`${showAllApps ? "allApps" : "home"}.miniapp.${item.packageName}`}
-          onAccessibilityTap={() => {
-            void handlePress(item)
-          }}
-          accessibilityActions={[{name: "activate"}]}
-          onAccessibilityAction={(event) => {
-            if (event.nativeEvent.actionName === "activate") void handlePress(item)
           }}
           className="flex-1 items-center justify-center pt-3"
           onPress={() => {
@@ -897,7 +843,7 @@ export function AppsGrid({
               return
             }
           }}
-          style={({pressed}) => ({opacity: pressed ? 0.7 : 1})}>
+          activeOpacity={0.7}>
           <AppIcon app={item} className="w-16 h-16" instant />
           <View className="w-full h-9 my-1 items-center justify-start">
             <Text
@@ -914,7 +860,7 @@ export function AppsGrid({
               text={item.name}
             />
           </View>
-        </Pressable>
+        </TouchableOpacity>
       )
     },
     [handlePress, showAllApps, showPopover],

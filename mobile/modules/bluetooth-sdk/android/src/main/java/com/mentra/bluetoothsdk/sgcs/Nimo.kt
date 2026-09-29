@@ -18,6 +18,7 @@ import android.media.MediaFormat
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.util.Base64
 import com.mentra.bluetoothsdk.Bridge
 import com.mentra.bluetoothsdk.DeviceManager
 import com.mentra.bluetoothsdk.DeviceStore
@@ -30,9 +31,7 @@ import java.nio.ByteOrder
 import java.util.Calendar
 import java.util.TimeZone
 import java.util.UUID
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
+import java.util.zip.Deflater
 
 // ---------- Nimo BLE Constants ----------
 
@@ -878,11 +877,6 @@ private class NimoReconnectionManager(
 // ---------- Nimo Class ----------
 
 class Nimo : SGCManager() {
-    override val sceneHandoffRequiresClear = false
-    // A legacy text confirmation replaces the active canvas; brightness itself does not.
-    override val showBrightnessConfirmation = false
-    // The host replays its scene on connection; a later welcome clear would erase it.
-    override val showConnectionConfirmation = false
 
     companion object {
         private const val PREFS_NAME = "NimoPrefs"
@@ -904,6 +898,8 @@ class Nimo : SGCManager() {
         private const val MAX_BOND_ATTEMPTS = 3
         private const val BOND_RETRY_DELAY_MS = 2_000L
         private const val BATTERY_POLL_MS = 30_000L
+        private const val TEXT_QUEUE_TICK_MS = 100L
+        private const val WRITE_WATCHDOG_MS = 1_000L
         private const val SET_TIME_MAX_ATTEMPTS = 3
         private const val SET_TIME_RETRY_DELAY_MS = 500L
     }
@@ -913,25 +909,12 @@ class Nimo : SGCManager() {
         hasMic = true
     }
 
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val mainScheduler = handlerScheduler(mainHandler)
-    // Variant-specific: release has no receiver or framebuffer protocol implementation.
-    private var diagnostics: NimoDiagnostics? = null
-    private val canvasEncoderThread = HandlerThread("NimoCanvasEncoder").apply { start() }
-    private val canvasEncoder = NimoCanvasEncoder(mainScheduler,
-        handlerScheduler(Handler(canvasEncoderThread.looper)),
-        { canvasEncoderThread.quitSafely() },
-        { Bridge.log("NIMO: canvas validation/encoding failed; retaining last valid scene: ${it.message}") })
-    private val canvas = NimoCanvasCoordinator(mainScheduler,
-        { (negotiatedMtu - 3).coerceIn(20, 512) }, ::enqueueFrames, ::abortTransport,
-        { Bridge.log("NIMO: canvas rejected status=$it; not a render ACK") },
-        { diagnostics?.cancelHeldCapture("Canvas scope takeover preempted held capture", resumeCanvas = false) })
-
-    private fun handlerScheduler(handler: Handler) = NimoScheduler { delay, task ->
-        val runnable = Runnable(task)
-        handler.postDelayed(runnable, delay)
-        ({ handler.removeCallbacks(runnable) })
-    }
+    // The text surface every sendTextWall renders into. The ASR note view (appId 0x04,
+    // note text resId 0x00) is a plain text page that renders pushed text directly;
+    // Prompter (0x06) was tried first but did not display pushed text on hardware.
+    private val textAppId = NimoProtocol.APP_ID_ASR_NOTE
+    private val textLayoutId = 0
+    private val textResId = 0
 
     // BLE
     private val context: Context
@@ -943,6 +926,7 @@ class Nimo : SGCManager() {
     private var micChar: BluetoothGattCharacteristic? = null
     private var isDisconnecting = false
     private var negotiatedMtu = 23
+
     // Device search
     private var DEVICE_SEARCH_ID = "NOT_SET"
 
@@ -970,6 +954,7 @@ class Nimo : SGCManager() {
 
     private val reconnectionManager = NimoReconnectionManager()
     private val receiveAssembler = NimoReceiveAssembler()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     // Handshake
     private enum class HandshakeState {
@@ -980,7 +965,6 @@ class Nimo : SGCManager() {
     }
     private var handshakeState = HandshakeState.IDLE
     private var twsConnected = false
-    private var peerCompanionReady: Boolean? = null
     private var twsTimeoutRunnable: Runnable? = null
     private var pairingTimeoutRunnable: Runnable? = null
 
@@ -988,16 +972,20 @@ class Nimo : SGCManager() {
     private class PendingAck(val onResult: (Boolean) -> Unit, val timeout: Runnable)
     private val pendingAcks = mutableMapOf<Int, PendingAck>()
 
-    // One queue owns characteristic writes and CCCD callbacks, including non-canvas commands.
-    private val writes = NimoGattQueue<BluetoothGattCharacteristic>(mainScheduler,
-        { characteristic, bytes ->
-            characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-            characteristic.value = bytes
-            gatt?.writeCharacteristic(characteristic) ?: false
-        }, ::abortTransport, NimoBLE.INTER_FRAME_DELAY_MS)
+    // Serialized write queue: Android allows one in-flight GATT op; WRITE_TYPE_DEFAULT also
+    // gives us long-writes when a 509-byte frame exceeds the negotiated MTU.
+    private class QueuedWrite(val char: BluetoothGattCharacteristic, val bytes: ByteArray)
+    private val writeQueue = ArrayDeque<QueuedWrite>()
+    private var writeInFlight = false
+    private var writeWatchdog: Runnable? = null
 
-    // Heartbeat
+    // Heartbeat / text queue
     private var batteryPollRunnable: Runnable? = null
+    private var textQueueRunnable: Runnable? = null
+    private var pendingText: String? = null
+    private var textAppEntered = false
+    private var navAppEntered = false
+    private var currentGlassesAppId = -1
 
     // Battery
     private var lastBatteryLevel = -1
@@ -1051,7 +1039,7 @@ class Nimo : SGCManager() {
         Bridge.log("NIMO: target is bonded — connecting directly (no discovery)")
         lastDeviceName = target.name
         lastDeviceAddress = target.address
-        mainHandler.post { connectCompanionGatt(target) }
+        mainHandler.post { connectGattLe(target) }
         return true
     }
 
@@ -1068,12 +1056,6 @@ class Nimo : SGCManager() {
     }
 
     override fun disconnect() {
-        if (Looper.myLooper() != mainHandler.looper) {
-            // The manager can discard or replace this communicator immediately on return.
-            // Finish local teardown on its owning looper before releasing that caller.
-            runBlocking { withContext(Dispatchers.Main) { disconnect() } }
-            return
-        }
         Bridge.log("NIMO: disconnect()")
         isDisconnecting = true
         cancelPairingTimeout()
@@ -1098,10 +1080,6 @@ class Nimo : SGCManager() {
     }
 
     override fun forget() {
-        if (Looper.myLooper() != mainHandler.looper) {
-            runBlocking { withContext(Dispatchers.Main) { forget() } }
-            return
-        }
         Bridge.log("NIMO: forget()")
         disconnect()
         lastDeviceAddress = null
@@ -1110,14 +1088,7 @@ class Nimo : SGCManager() {
     }
 
     override fun cleanup() {
-        if (Looper.myLooper() != mainHandler.looper) {
-            runBlocking { withContext(Dispatchers.Main) { cleanup() } }
-            return
-        }
-        canvasEncoder.close()
         disconnect()
-        diagnostics?.close()
-        diagnostics = null
         audioClient.stop()
     }
 
@@ -1179,15 +1150,20 @@ class Nimo : SGCManager() {
     }
 
     override fun clearDisplay() {
-        submitCanvas("legacy") { emptyList() }
+        // Keep the text app/page alive — a blank update avoids re-entering the app next time.
+        sendTextWall(" ")
     }
 
     override fun sendText(text: String) {
-        sendTextWall(text)
+        // Coalesced: only the most recent pending text survives until the next 100ms drain.
+        Bridge.log("NIMO: sendText(text=$text)")
+        pendingText = text
     }
 
     override fun sendTextWall(text: String) {
-        submitCanvas("legacy") { canvasText(text, 0, 0, 500, 220, 0, 0) }
+        // Coalesced: only the most recent pending text survives until the next 100ms drain.
+        Bridge.log("NIMO: sendTextWall(text=$text)")
+        pendingText = text
     }
 
     override fun sendDoubleTextWall(top: String, bottom: String) {
@@ -1203,9 +1179,12 @@ class Nimo : SGCManager() {
             borderWidth: Int,
             borderRadius: Int
     ) {
-        submitCanvas("legacy") {
-            canvasText(text, x, y, width, height, borderWidth, borderRadius)
-        }
+        // Navigation pushes turn text via positioned_text. Nimo widgets have fixed geometry, so
+        // position/border are ignored — funnel the text through the same coalesced path as
+        // sendTextWall so it renders on the ASR note page. Without this override the base no-op
+        // silently dropped all navigation text.
+        // Bridge.log("NIMO: sendPositionedText(text=$text)")
+        // pendingText = text
     }
 
     override fun displayBitmap(
@@ -1215,18 +1194,57 @@ class Nimo : SGCManager() {
             width: Int?,
             height: Int?
     ): Boolean {
+        // Nimo widgets have fixed geometry; x/y are not honored. Renders into the navigation
+        // large-map widget (appId 0x01, resId 0x05, 452x170 2bpp) — the full-width nav map,
+        // which shows far more than the small 160x160 mini-map (resId 0x00). bitmapToGrayscale
+        // aspect-fits onto black, so a non-matching source aspect letterboxes rather than
+        // distorts. The nav app must be foregrounded before pushing content (mirrors the text
+        // path). TODO: hardware-verify the large-map widget renders and the nav app-mode.
+        val targetWidth = NimoProtocol.NAV_LARGE_MAP_WIDTH
+        val targetHeight = NimoProtocol.NAV_LARGE_MAP_HEIGHT
+        Bridge.log("NIMO: displayBitmap → nav large map (navAppEntered=$navAppEntered)")
         return try {
-            val left = x ?: 0; val top = y ?: 0
-            val w = width ?: (NimoCanvasCodec.WIDTH - left)
-            val h = height ?: (NimoCanvasCodec.HEIGHT - top)
-            NimoCanvasCodec.region(left, top, w, h)
-            // The Boolean acknowledges bounded local validation, never visible rendering.
-            // Decode once now; the background encoder owns/recycles this same source.
-            val source = decodeCanvasSource(base64ImageData)
-            encodeCanvas("legacy", release = { source.recycle() }) {
-                NimoCanvasCodec.replace(listOf(NimoCanvasCodec.bitmap(left, top, w, h,
-                    bitmapToGrayscale(source, w, h))))
+            val imageBytes = Base64.decode(base64ImageData, Base64.DEFAULT)
+            val bitmap =
+                    BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size) ?: return false
+            val grayscale = bitmapToGrayscale(bitmap, targetWidth, targetHeight)
+            val packed = packL8To2bpp(grayscale)
+            val (payload, compression) = compressAdaptive(packed)
+            if (!navAppEntered) {
+                sendFrame(
+                        NimoFrameCodec.encodeFrame(
+                                NimoProtocol.CMD_CONTROL_INSTRUCTION,
+                                NimoProtocol.CTRL_ENTER_APP,
+                                byteArrayOf(
+                                        NimoProtocol.APP_ID_NAV.toByte(),
+                                        NimoProtocol.APP_MODE_STANDALONE.toByte()
+                                )
+                        )
+                )
+                // Optimistic; corrected by app-state reports if the glasses refuse/exit.
+                navAppEntered = true
             }
+            val content =
+                    NimoFrameCodec.imageHeader(
+                            width = targetWidth,
+                            height = targetHeight,
+                            formatBpp = NimoProtocol.FORMAT_2BPP,
+                            compression = compression,
+                            originalSize = packed.size,
+                            compressedSize =
+                                    if (compression == NimoProtocol.COMPRESSION_NONE) 0
+                                    else payload.size
+                    ) + payload
+            val frames =
+                    NimoFrameCodec.updateContentFrames(
+                            appId = NimoProtocol.APP_ID_NAV,
+                            layoutId = 0,
+                            resId = NimoProtocol.NAV_RES_LARGE_MAP,
+                            resType = NimoProtocol.WIDGET_PICTURE,
+                            content = content
+                    )
+            enqueueFrames(frames)
+            true
         } catch (e: Exception) {
             Bridge.log("NIMO: displayBitmap failed: ${e.message}")
             false
@@ -1234,60 +1252,19 @@ class Nimo : SGCManager() {
     }
 
     override fun showDashboard() {
-        exit()
-    }
-
-    override fun applySceneFrame(frame: SceneFrame) {
-        // Serialize the complete ordered scene, not the host differ's annotations.
-        encodeCanvas("${frame.appId}:${frame.epoch}", frame.replay) {
-            NimoCanvasCodec.scene(frame.elements.map { element ->
-                NimoCanvasCodec.Element(element.type, element.x, element.y, element.w, element.h,
-                    element.text, element.data, element.border, element.radius)
-            }, ::decodeCanvasImage)
-        }
-    }
-
-    override fun clearSceneElements(elementIds: List<String>) {
-        // Dynamic Layout replaces a complete scene; there is no persistent per-ID state.
-        clearDisplay()
-    }
-
-    private fun canvasText(text: String, x: Int, y: Int, width: Int, height: Int,
-                           border: Int, radius: Int): List<NimoCanvasCodec.Object> {
-        require(border in 0..32 && radius in 0..255)
-        val objects = mutableListOf<NimoCanvasCodec.Object>()
-        if (border > 0) objects.add(NimoCanvasCodec.rectangle(x, y, width, height, border, radius))
-        // Legacy callers may send an unwrapped paragraph. Scene IR uses textRows directly.
-        if (text.isNotEmpty() && !text.contains('\n')) {
-            objects.add(NimoCanvasCodec.label(text, x, y, width, height))
-        } else objects.addAll(NimoCanvasCodec.textRows(text, x, y, width, height))
-        return objects
-    }
-
-    /** Keep only the latest pending encode; completion cannot overwrite a newer scene or Exit. */
-    private fun submitCanvas(scope: String, force: Boolean = false,
-                             objects: () -> List<NimoCanvasCodec.Object>) {
-        encodeCanvas(scope, force) { NimoCanvasCodec.replace(objects()) }
-    }
-
-    private fun encodeCanvas(scope: String, force: Boolean = false, release: () -> Unit = {},
-                             encode: () -> ByteArray): Boolean =
-        canvasEncoder.submit(encode, release) { bytes -> canvas.offer(bytes, scope, force) }
-
-    private fun decodeCanvasSource(data: String): Bitmap {
-        val bytes = NimoCanvasCodec.imageBytes(data)
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        require(bounds.outWidth in 1..4096 && bounds.outHeight in 1..4096 &&
-            bounds.outWidth.toLong() * bounds.outHeight <= 4_000_000) { "Image decoded size exceeds limit" }
-        return requireNotNull(BitmapFactory.decodeByteArray(bytes, 0, bytes.size)) { "Invalid image" }
-    }
-
-    private fun decodeCanvasImage(data: String, width: Int, height: Int): ByteArray {
-        val source = decodeCanvasSource(data)
-        return try {
-            bitmapToGrayscale(source, width, height)
-        } finally { source.recycle() }
+        Bridge.log("NIMO: showDashboard()")
+        textAppEntered = false
+        navAppEntered = false
+        sendFrame(
+                NimoFrameCodec.encodeFrame(
+                        NimoProtocol.CMD_CONTROL_INSTRUCTION,
+                        NimoProtocol.CTRL_ENTER_APP,
+                        byteArrayOf(
+                                NimoProtocol.APP_ID_DASHBOARD.toByte(),
+                                NimoProtocol.APP_MODE_STANDALONE.toByte()
+                        )
+                )
+        )
     }
 
     override fun setDashboardPosition(height: Int, depth: Int) {
@@ -1348,11 +1325,17 @@ class Nimo : SGCManager() {
     }
 
     override fun exit() {
-        canvasEncoder.invalidate()
-        mainHandler.post {
-            diagnostics?.cancelHeldCapture("Explicit host exit preempted held capture", resumeCanvas = false)
-            canvas.exit()
-        }
+        Bridge.log("NIMO: exit()")
+        val appId = if (currentGlassesAppId >= 0) currentGlassesAppId else textAppId
+        textAppEntered = false
+        navAppEntered = false
+        sendFrame(
+                NimoFrameCodec.encodeFrame(
+                        NimoProtocol.CMD_CONTROL_INSTRUCTION,
+                        NimoProtocol.CTRL_QUIT_APP,
+                        byteArrayOf(appId.toByte())
+                )
+        )
     }
 
     override fun sendShutdown() {
@@ -1562,16 +1545,23 @@ class Nimo : SGCManager() {
         stopScan()
         lastDeviceName = name
         lastDeviceAddress = device.address
-        connectCompanionGatt(device)
+        connectGattLe(device)
     }
 
     /**
-     * Discover and bond the main device over classic Bluetooth, then use BR/EDR ATT
-     * for Companion service 7033. The separate <name>_BLE ANCS peripheral is not the
-     * canvas data channel. This matches the vendor transport=BREDR connection path.
+     * Vendor connection model (from bitfantasy_glasses_sdk_transport_ble + their
+     * flutter_blue_plus fork notes, "Android CTKD transport=BREDR"):
+     *
+     * 1. The main device is discovered over CLASSIC Bluetooth (it never advertises its
+     *    name over LE; the "<name>_BLE" peripheral is a separate ANCS-only device).
+     * 2. Pairing is a CLASSIC (BR/EDR) bond. CTKD (cross-transport key derivation)
+     *    derives the LE keys — critically the IRK — during that bond.
+     * 3. The DATA channel is GATT over LE (service 7033). The glasses advertise with a
+     *    resolvable private address, so connecting by their public MAC only works once
+     *    the phone holds the IRK from step 2. (Same reason iOS requires Settings-app
+     *    pairing first — iOS performs the classic bond + CTKD itself.)
      */
-    private fun connectCompanionGatt(device: android.bluetooth.BluetoothDevice) {
-        if (isDisconnecting || gatt != null) return
+    private fun connectGattLe(device: android.bluetooth.BluetoothDevice) {
         // Classic discovery degrades/aborts connections — always cancel first.
         try {
             bluetoothAdapter?.cancelDiscovery()
@@ -1584,11 +1574,11 @@ class Nimo : SGCManager() {
                     android.bluetooth.BluetoothDevice.BOND_NONE
                 }
         if (bondState != android.bluetooth.BluetoothDevice.BOND_BONDED) {
-            // Bond over classic first, then open the Companion bearer on completion.
+            // Bond over classic first (CTKD gives us the LE keys); connect on completion.
             startBond(device)
             return
         }
-        connectBredrTransport(device)
+        connectLeTransport(device)
     }
 
     /**
@@ -1607,7 +1597,7 @@ class Nimo : SGCManager() {
         if (bondState == android.bluetooth.BluetoothDevice.BOND_BONDED) {
             Bridge.log("NIMO: already bonded with ${device.address} — connecting")
             unregisterBondReceiver()
-            connectBredrTransport(device)
+            connectLeTransport(device)
             return
         }
         // Don't fire a second createBond on top of one already in flight (duplicate
@@ -1635,14 +1625,13 @@ class Nimo : SGCManager() {
                     false
                 }
         if (!started) {
-            Bridge.log("NIMO: createBond failed to start — trying Companion BR/EDR connection")
+            Bridge.log("NIMO: createBond failed to start — trying LE connect anyway")
             unregisterBondReceiver()
-            connectBredrTransport(device)
+            connectLeTransport(device)
         }
     }
 
-    private fun connectBredrTransport(device: android.bluetooth.BluetoothDevice) {
-        if (isDisconnecting || gatt != null) return
+    private fun connectLeTransport(device: android.bluetooth.BluetoothDevice) {
         // GATT over BR/EDR: the glasses pair with a legacy (non-SC) link key, so no LE
         // keys exist (le_linkkey_known:F) and the controller records the device as
         // BR_EDR-only — the 7033 UART service is served over the classic link. This is
@@ -1658,7 +1647,6 @@ class Nimo : SGCManager() {
                         gattCallback,
                         android.bluetooth.BluetoothDevice.TRANSPORT_BREDR
                 )
-        gatt?.let { writes.connected(it) }
     }
 
     private var bondReceiver: android.content.BroadcastReceiver? = null
@@ -1700,7 +1688,7 @@ class Nimo : SGCManager() {
                                     // (right after pairing) succeeds instead of failing until the
                                     // user manually retries into the already-bonded fast path.
                                     mainHandler.postDelayed(
-                                            { connectBredrTransport(device) },
+                                            { connectLeTransport(device) },
                                             POST_BOND_SETTLE_MS
                                     )
                                 }
@@ -1755,7 +1743,7 @@ class Nimo : SGCManager() {
         return try {
             val device = adapter.getRemoteDevice(address)
             Bridge.log("NIMO: connectByAddress - ${device.name ?: address}")
-            connectCompanionGatt(device)
+            connectGattLe(device)
             true
         } catch (e: Exception) {
             Bridge.log("NIMO: connectByAddress failed: ${e.message}")
@@ -1786,19 +1774,18 @@ class Nimo : SGCManager() {
             object : BluetoothGattCallback() {
                 override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
                     mainHandler.post {
-                        if (g !== gatt) return@post
                         Bridge.log("NIMO: onConnectionStateChange status=$status newState=$newState")
-                        if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                        if (newState == BluetoothProfile.STATE_CONNECTED) {
                             Bridge.log("NIMO: Connected to ${g.device?.name ?: "unknown"}")
                             lastDeviceAddress = g.device?.address
                             // Do NOT request a large MTU here: the vendor transport warns that
                             // requesting one during connect makes some Nimo firmwares throw a
                             // GATT error and loop reconnecting. The system negotiates the MTU;
-                            // canvas fragments fit the currently known writable ATT size.
+                            // frames larger than it go out as ATT long writes (WRITE_TYPE_DEFAULT).
                             try {
-                                if (!g.discoverServices()) abortTransport("Service discovery did not start")
+                                g.discoverServices()
                             } catch (e: SecurityException) {
-                                abortTransport("Service discovery permission denied")
+                                Bridge.log("NIMO: discoverServices SecurityException: ${e.message}")
                             }
                         } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                             Bridge.log("NIMO: Disconnected")
@@ -1815,8 +1802,6 @@ class Nimo : SGCManager() {
                             DeviceStore.apply("glasses", "fullyBooted", false)
                             DeviceStore.apply("glasses", "connectionState", ConnTypes.DISCONNECTED)
                             startReconnectionTimer()
-                        } else if (status != BluetoothGatt.GATT_SUCCESS) {
-                            abortTransport("GATT connection failed status=$status")
                         }
                     }
                 }
@@ -1824,19 +1809,21 @@ class Nimo : SGCManager() {
                 override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
                     Bridge.log("NIMO: onMtuChanged mtu=$mtu status=$status")
                     mainHandler.post {
-                        if (g !== gatt || status != BluetoothGatt.GATT_SUCCESS) return@post
-                        negotiatedMtu = mtu.coerceIn(23, 517)
+                        negotiatedMtu = mtu
+                        try {
+                            g.discoverServices()
+                        } catch (e: SecurityException) {
+                            Bridge.log("NIMO: discoverServices SecurityException: ${e.message}")
+                        }
                     }
                 }
 
                 override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
                     if (status != BluetoothGatt.GATT_SUCCESS) {
                         Bridge.log("NIMO: onServicesDiscovered failed status=$status")
-                        mainHandler.post { if (g === gatt) abortTransport("Service discovery failed status=$status") }
                         return
                     }
                     mainHandler.post {
-                        if (g !== gatt) return@post
                         val service = g.getService(NimoBLE.SERVICE_UUID)
                         if (service == null) {
                             // Dump everything so a UUID mismatch is diagnosable from logs.
@@ -1863,9 +1850,8 @@ class Nimo : SGCManager() {
                             return@post
                         }
                         enableNotifications(g, rxChar!!) {
-                            val mic = micChar
-                            if (mic == null) startHandshake()
-                            else enableNotifications(g, mic) { startHandshake() }
+                            micChar?.let { mic -> enableNotifications(g, mic) {} }
+                            startHandshake()
                         }
                     }
                 }
@@ -1875,15 +1861,10 @@ class Nimo : SGCManager() {
                         g: BluetoothGatt,
                         characteristic: BluetoothGattCharacteristic
                 ) {
-                    val data = characteristic.value?.copyOf() ?: return
-                    mainHandler.post {
-                        if (g !== gatt) return@post
-                        when (characteristic.uuid) {
-                            NimoBLE.CHAR_RX -> if (characteristic.service?.uuid == NimoBLE.SERVICE_UUID) {
-                                handleRxPacket(data)
-                            }
-                            NimoBLE.CHAR_MIC -> audioClient.enqueue(data)
-                        }
+                    val data = characteristic.value ?: return
+                    when (characteristic.uuid) {
+                        NimoBLE.CHAR_RX -> mainHandler.post { handleRxPacket(data) }
+                        NimoBLE.CHAR_MIC -> audioClient.enqueue(data)
                     }
                 }
 
@@ -1892,9 +1873,13 @@ class Nimo : SGCManager() {
                         characteristic: BluetoothGattCharacteristic,
                         status: Int
                 ) {
-                    mainHandler.post {
-                        writes.written(g, characteristic, status == BluetoothGatt.GATT_SUCCESS)
-                    }
+                    mainHandler.postDelayed(
+                            {
+                                writeInFlight = false
+                                drainWriteQueue()
+                            },
+                            NimoBLE.INTER_FRAME_DELAY_MS
+                    )
                 }
 
                 override fun onDescriptorWrite(
@@ -1902,11 +1887,11 @@ class Nimo : SGCManager() {
                         descriptor: BluetoothGattDescriptor,
                         status: Int
                 ) {
-                    mainHandler.post {
-                        writes.descriptorWritten(g, descriptor, status == BluetoothGatt.GATT_SUCCESS)
-                    }
+                    mainHandler.post { descriptorWriteCompletion?.let { it() } }
                 }
             }
+
+    private var descriptorWriteCompletion: (() -> Unit)? = null
 
     @Suppress("deprecation")
     private fun enableNotifications(
@@ -1914,26 +1899,66 @@ class Nimo : SGCManager() {
             characteristic: BluetoothGattCharacteristic,
             onComplete: () -> Unit
     ) {
-        if (g !== gatt || !g.setCharacteristicNotification(characteristic, true)) {
-            abortTransport("Could not enable local notifications")
-            return
-        }
+        g.setCharacteristicNotification(characteristic, true)
         val descriptor = characteristic.getDescriptor(NimoBLE.CLIENT_CHARACTERISTIC_CONFIG)
         if (descriptor != null) {
+            descriptorWriteCompletion = {
+                descriptorWriteCompletion = null
+                onComplete()
+            }
             descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            writes.subscribe(g, descriptor, { g.writeDescriptor(descriptor) }, onComplete)
+            g.writeDescriptor(descriptor)
         } else {
-            abortTransport("Notification descriptor is missing")
+            onComplete()
         }
     }
 
     // ---------- Write Queue ----------
 
+    @Suppress("deprecation")
+    private fun drainWriteQueue() {
+        if (writeInFlight) return
+        val item = writeQueue.removeFirstOrNull() ?: return
+        val g = gatt
+        if (g == null) {
+            writeQueue.clear()
+            return
+        }
+        writeInFlight = true
+        item.char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        item.char.value = item.bytes
+        val ok =
+                try {
+                    g.writeCharacteristic(item.char)
+                } catch (e: Exception) {
+                    Bridge.log("NIMO: writeCharacteristic failed: ${e.message}")
+                    false
+                }
+        if (!ok) {
+            // Another GATT op (e.g. a descriptor write) is in flight — requeue and retry
+            // shortly instead of dropping the frame.
+            writeInFlight = false
+            writeQueue.addFirst(item)
+            mainHandler.postDelayed({ drainWriteQueue() }, 100)
+            return
+        }
+        // Watchdog: if the write callback never arrives, unblock the queue.
+        writeWatchdog?.let { mainHandler.removeCallbacks(it) }
+        val watchdog = Runnable {
+            if (writeInFlight) {
+                Bridge.log("NIMO: write watchdog fired — forcing queue drain")
+                writeInFlight = false
+                drainWriteQueue()
+            }
+        }
+        writeWatchdog = watchdog
+        mainHandler.postDelayed(watchdog, WRITE_WATCHDOG_MS)
+    }
+
     private fun enqueueWrite(char: BluetoothGattCharacteristic, bytes: ByteArray) {
-        val expectedGatt = gatt ?: return
         mainHandler.post {
-            if (gatt !== expectedGatt) return@post
-            writes.enqueue(expectedGatt, char, listOf(bytes))
+            writeQueue.addLast(QueuedWrite(char, bytes))
+            drainWriteQueue()
         }
     }
 
@@ -1942,25 +1967,14 @@ class Nimo : SGCManager() {
         enqueueWrite(tx, frame)
     }
 
-    private fun enqueueFrames(frames: List<ByteArray>, finalStarted: () -> Unit,
-                              completed: () -> Unit): Boolean {
-        val tx = txChar ?: return false
-        val connection = gatt ?: return false
-        // Coordinator and GATT callbacks are Main-confined: enqueue the complete chain atomically.
-        return writes.enqueue(connection, tx, frames, finalStarted, completed)
-    }
-
-    private fun abortTransport(reason: String) {
-        Bridge.log("NIMO: resetting transport: $reason")
-        val old = gatt
-        gatt = null
-        txChar = null; rxChar = null; micChar = null
-        resetSessionState()
-        try { old?.disconnect(); old?.close() } catch (_: Exception) {}
-        DeviceStore.apply("glasses", "connected", false)
-        DeviceStore.apply("glasses", "fullyBooted", false)
-        DeviceStore.apply("glasses", "connectionState", ConnTypes.DISCONNECTED)
-        if (!isDisconnecting) startReconnectionTimer()
+    private fun enqueueFrames(frames: List<ByteArray>) {
+        val tx = txChar ?: return
+        mainHandler.post {
+            for (frame in frames) {
+                writeQueue.addLast(QueuedWrite(tx, frame))
+            }
+            drainWriteQueue()
+        }
     }
 
     // ---------- Pending ACKs ----------
@@ -1979,8 +1993,7 @@ class Nimo : SGCManager() {
             it.onResult(false)
         }
         val timeout = Runnable {
-            // Do not retry a timed-out key on the same transport: a late response is uncorrelated.
-            if (pendingAcks.remove(ackKey) != null) abortTransport("Handshake ACK timeout cmd=$cmd key=$key")
+            pendingAcks.remove(ackKey)?.onResult(false)
         }
         pendingAcks[ackKey] = PendingAck(onResult, timeout)
         mainHandler.postDelayed(timeout, timeoutMs)
@@ -2044,14 +2057,12 @@ class Nimo : SGCManager() {
 
     private fun attemptSetTime() {
         if (handshakeState != HandshakeState.AWAITING_TIME_ACK || gatt == null) return
-        val expectedGatt = gatt
         setTimeAttempts++
         sendAwaitingAck(
                 NimoProtocol.CMD_SET_PARAMETER,
                 NimoProtocol.SET_TIME,
                 NimoFrameCodec.encodeDeviceTime()
         ) { ok ->
-            if (gatt !== expectedGatt || handshakeState != HandshakeState.AWAITING_TIME_ACK) return@sendAwaitingAck
             if (ok) {
                 finishHandshake()
             } else if (setTimeAttempts < SET_TIME_MAX_ATTEMPTS &&
@@ -2061,7 +2072,7 @@ class Nimo : SGCManager() {
                 // The firmware can answer "busy" right after the link comes up —
                 // give it a moment and retry instead of dropping the connection.
                 Bridge.log("NIMO: setTime attempt $setTimeAttempts failed — retrying")
-                mainHandler.postDelayed({ if (gatt === expectedGatt) attemptSetTime() }, SET_TIME_RETRY_DELAY_MS)
+                mainHandler.postDelayed({ attemptSetTime() }, SET_TIME_RETRY_DELAY_MS)
             } else {
                 Bridge.log("NIMO: setTime failed after $setTimeAttempts attempts — handshake failed")
                 handshakeFailed()
@@ -2089,17 +2100,6 @@ class Nimo : SGCManager() {
         DeviceStore.apply("glasses", "fullyBooted", true)
         DeviceStore.apply("glasses", "connectionState", ConnTypes.CONNECTED)
         startTimers()
-        if (diagnostics == null) {
-            diagnostics = NimoDiagnostics(
-                context,
-                mainHandler,
-                { frame, completed -> enqueueFrames(listOf(frame), {}, completed) },
-                { ready -> canvas.hold(ready) },
-                { resume -> canvas.releaseHold(resume) },
-            )
-        }
-        diagnostics?.connected((negotiatedMtu - 3).coerceIn(20, 512))
-        canvas.readiness(twsConnected && peerCompanionReady == true)
     }
 
     private fun handshakeFailed() {
@@ -2109,17 +2109,18 @@ class Nimo : SGCManager() {
     }
 
     private fun resetSessionState() {
-        diagnostics?.disconnected()
         handshakeState = HandshakeState.IDLE
-        cancelTwsTimeout()
         twsConnected = false
-        peerCompanionReady = null
-        canvasEncoder.invalidate()
-        canvas.disconnected()
+        textAppEntered = false
+        navAppEntered = false
+        currentGlassesAppId = -1
+        pendingText = null
         audioClient.stop()
         receiveAssembler.reset()
-        writes.reset()
-        negotiatedMtu = 23
+        writeQueue.clear()
+        writeInFlight = false
+        writeWatchdog?.let { mainHandler.removeCallbacks(it) }
+        writeWatchdog = null
         failAllPendingAcks()
         stopTimers()
     }
@@ -2141,7 +2142,7 @@ class Nimo : SGCManager() {
         }
     }
 
-    // ---------- Timers (battery poll keepalive) ----------
+    // ---------- Timers (battery poll keepalive + text queue) ----------
 
     private fun startTimers() {
         stopTimers()
@@ -2157,30 +2158,123 @@ class Nimo : SGCManager() {
         batteryPollRunnable = battery
         mainHandler.postDelayed(battery, BATTERY_POLL_MS)
 
+        val textQueue =
+                object : Runnable {
+                    override fun run() {
+                        drainTextQueue()
+                        mainHandler.postDelayed(this, TEXT_QUEUE_TICK_MS)
+                    }
+                }
+        textQueueRunnable = textQueue
+        mainHandler.postDelayed(textQueue, TEXT_QUEUE_TICK_MS)
     }
 
     private fun stopTimers() {
         batteryPollRunnable?.let { mainHandler.removeCallbacks(it) }
         batteryPollRunnable = null
+        textQueueRunnable?.let { mainHandler.removeCallbacks(it) }
+        textQueueRunnable = null
+    }
+
+    // ---------- Text Rendering ----------
+
+    /**
+     * TEMP HW TEST: build a 160x160 grayscale test pattern (four vertical bands
+     * at the 4 quantization levels: black | dark | light | white) and push it
+     * through the exact same nav-minimap pipeline as displayBitmap. If the bands
+     * render left→right on the glasses, the SDK bitmap path works end-to-end.
+     */
+    private fun displaySampleBitmap() {
+        val w = 160
+        val h = 160
+        val gray = ByteArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val band = (x * 4 / w).coerceIn(0, 3) // 0..3 across the width
+                gray[y * w + x] = (band * 85).toByte() // 0, 85, 170, 255
+            }
+        }
+        val packed = packL8To2bpp(gray)
+        val (payload, compression) = compressAdaptive(packed)
+        if (!navAppEntered) {
+            sendFrame(
+                    NimoFrameCodec.encodeFrame(
+                            NimoProtocol.CMD_CONTROL_INSTRUCTION,
+                            NimoProtocol.CTRL_ENTER_APP,
+                            byteArrayOf(
+                                    NimoProtocol.APP_ID_NAV.toByte(),
+                                    NimoProtocol.APP_MODE_STANDALONE.toByte()
+                            )
+                    )
+            )
+            navAppEntered = true
+        }
+        val content =
+                NimoFrameCodec.imageHeader(
+                        width = w,
+                        height = h,
+                        formatBpp = NimoProtocol.FORMAT_2BPP,
+                        compression = compression,
+                        originalSize = packed.size,
+                        compressedSize =
+                                if (compression == NimoProtocol.COMPRESSION_NONE) 0
+                                else payload.size
+                ) + payload
+        val frames =
+                NimoFrameCodec.updateContentFrames(
+                        appId = NimoProtocol.APP_ID_NAV,
+                        layoutId = 0,
+                        resId = 0,
+                        resType = NimoProtocol.WIDGET_PICTURE,
+                        content = content
+                )
+        enqueueFrames(frames)
+        Bridge.log(
+                "NIMO: displaySampleBitmap → ${frames.size} frames, ${payload.size}B comp=$compression"
+        )
+    }
+
+    private fun drainTextQueue() {
+        val text = pendingText ?: return
+        if (handshakeState != HandshakeState.READY) return
+        pendingText = null
+
+        // All text (text_wall / double_text_wall / reference_card / positioned_text) renders on
+        // the ASR note page — the only text surface confirmed to render on hardware.
+        Bridge.log("NIMO: text → glasses (enterApp=${!textAppEntered}): \"${text.take(60)}\"")
+        if (!textAppEntered) {
+            sendFrame(
+                    NimoFrameCodec.encodeFrame(
+                            NimoProtocol.CMD_CONTROL_INSTRUCTION,
+                            NimoProtocol.CTRL_ENTER_APP,
+                            byteArrayOf(textAppId.toByte(), NimoProtocol.APP_MODE_STANDALONE.toByte())
+                    )
+            )
+            // Optimistic; corrected by app-state reports if the glasses refuse/exit.
+            textAppEntered = true
+        }
+
+        val frames =
+                NimoFrameCodec.updateContentFrames(
+                        appId = textAppId,
+                        layoutId = textLayoutId,
+                        resId = textResId,
+                        resType = NimoProtocol.WIDGET_TEXT_NEW,
+                        content = text.toByteArray(Charsets.UTF_8)
+                )
+        enqueueFrames(frames)
     }
 
     // ---------- Incoming Data ----------
 
     private fun handleRxPacket(packet: ByteArray) {
-        // Diagnostic packets must retain their original wire CRC and framing.
-        if (diagnostics?.onPacket(packet) == true) return
-        if (packet.size >= 10 && packet[8].toInt() == 7 && (packet[9].toInt() and 255) in listOf(1, 3, 4)) {
-            val response = NimoCanvasCodec.response(packet) ?: return
-            canvas.response(response.first, response.second)
-            return
-        }
         receiveAssembler.cleanup()
         for (frame in receiveAssembler.ingest(packet)) {
             val decoded = NimoFrameCodec.decode(frame) ?: continue
             val cmd = decoded.cmd ?: continue
             val key = decoded.key ?: continue
             if (cmd == NimoProtocol.CMD_INSTRUCTION_REPORT) {
-                if (decoded.statusCode == 0) handleReport(key, decoded.data ?: ByteArray(0))
+                handleReport(key, decoded.data ?: ByteArray(0))
             } else {
                 handleResponse(cmd, key, decoded.statusCode ?: 1, decoded.data ?: ByteArray(0))
             }
@@ -2199,16 +2293,14 @@ class Nimo : SGCManager() {
                     Bridge.log("NIMO: app state report appId=$appId phase=$phase")
                     when (phase) {
                         NimoProtocol.STATE_ENTER -> {
-                            if (appId != NimoCanvasCodec.APP_ID) {
-                                diagnostics?.cancelHeldCapture("Native app takeover preempted held capture", resumeCanvas = false)
-                            }
-                            if (canvas.nativeApp(appId, true)) canvasEncoder.invalidate()
+                            currentGlassesAppId = appId
+                            if (appId != textAppId) textAppEntered = false
+                            if (appId != NimoProtocol.APP_ID_NAV) navAppEntered = false
                         }
                         NimoProtocol.STATE_EXIT -> {
-                            if (appId == NimoCanvasCodec.APP_ID) {
-                                diagnostics?.cancelHeldCapture("Canvas exit preempted held capture", resumeCanvas = false)
-                            }
-                            if (canvas.nativeApp(appId, false)) canvasEncoder.invalidate()
+                            if (appId == currentGlassesAppId) currentGlassesAppId = -1
+                            if (appId == textAppId) textAppEntered = false
+                            if (appId == NimoProtocol.APP_ID_NAV) navAppEntered = false
                         }
                     }
                 }
@@ -2219,10 +2311,7 @@ class Nimo : SGCManager() {
                 }
             }
             NimoProtocol.REPORT_BUSINESS -> handleBusinessReport(data)
-            NimoProtocol.REPORT_GATT_STATE -> {
-                // 0605's payload is undocumented. Only the heartbeat's defined
-                // slaveGatt field can establish peer Companion readiness.
-            }
+            NimoProtocol.REPORT_GATT_STATE -> {}
             else -> Bridge.log("NIMO: unknown report key=$key")
         }
     }
@@ -2235,13 +2324,7 @@ class Nimo : SGCManager() {
             NimoProtocol.BUSINESS_HEARTBEAT -> {
                 // [leftMv(2)][rightMv(2)][btSysStatus(4)][twsStatus(1)][slaveGatt(1)]
                 if (v.size >= 10) {
-                    peerCompanionReady = v[9].toInt() != 0
                     onTwsState((v[8].toInt() and 0xFF) >= 1)
-                    // Both predicates were sampled by this device report. TWS-only
-                    // reports and cached state cannot release a status-7 wait.
-                    if (handshakeState == HandshakeState.READY) {
-                        canvas.confirmedReadiness(twsConnected && peerCompanionReady == true)
-                    }
                 }
             }
             NimoProtocol.BUSINESS_BATTERY -> {
@@ -2266,7 +2349,6 @@ class Nimo : SGCManager() {
         if (!connected && handshakeState == HandshakeState.READY) {
             Bridge.log("NIMO: TWS service dropped mid-session (arm removed/off?)")
         }
-        if (handshakeState == HandshakeState.READY) canvas.readiness(connected && peerCompanionReady == true)
     }
 
     private fun handleInputEvent(code: Int) {
@@ -2366,15 +2448,20 @@ class Nimo : SGCManager() {
 
     // ---------- Bitmap Helpers ----------
 
-    /** Scale into the exact layout box, compositing alpha over black, then convert to L8. */
+    /** Aspect-fit the bitmap into [width]x[height] on black, then convert to L8 grayscale. */
     private fun bitmapToGrayscale(source: Bitmap, width: Int, height: Int): ByteArray {
         val scaled = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(scaled)
         canvas.drawColor(Color.BLACK)
+        val scale = minOf(width.toFloat() / source.width, height.toFloat() / source.height)
+        val dw = (source.width * scale).toInt()
+        val dh = (source.height * scale).toInt()
+        val left = (width - dw) / 2
+        val top = (height - dh) / 2
         canvas.drawBitmap(
                 source,
                 null,
-                Rect(0, 0, width, height),
+                Rect(left, top, left + dw, top + dh),
                 Paint(Paint.FILTER_BITMAP_FLAG)
         )
 
@@ -2384,11 +2471,62 @@ class Nimo : SGCManager() {
         for (i in pixels.indices) {
             val p = pixels[i]
             val luminance =
-                    (77 * Color.red(p) + 150 * Color.green(p) + 29 * Color.blue(p) + 128) shr 8
-            gray[i] = luminance.coerceIn(0, 255).toByte()
+                    (0.299 * Color.red(p) + 0.587 * Color.green(p) + 0.114 * Color.blue(p)).toInt()
+            // Invert luminance. MentraOS app bitmaps follow the platform convention of dark
+            // content on a light background (see BitmapJavaUtils: gray<128 -> "black"). Nimo's
+            // additive display lights up high 2bpp values (3 = white), so sending luma as-is
+            // lights the whole lens for the background and leaves the content dark — the
+            // inverted look. 255 - luma flips it so content renders lit on a dark lens.
+            gray[i] = (255 - luminance.coerceIn(0, 255)).toByte()
         }
         scaled.recycle()
         return gray
     }
 
+    /** L8 → 2bpp: thresholds 0x40/0x80/0xC0, 4 pixels per byte, MSB first. */
+    private fun packL8To2bpp(l8: ByteArray): ByteArray {
+        val outBytes = (l8.size + 3) shr 2
+        val dst = ByteArray(outBytes)
+        for (i in 0 until outBytes) {
+            var packed = 0
+            for (j in 0 until 4) {
+                val idx = i * 4 + j
+                var value = 0
+                if (idx < l8.size) {
+                    val px = l8[idx].toInt() and 0xFF
+                    value =
+                            when {
+                                px < 0x40 -> 0
+                                px < 0x80 -> 1
+                                px < 0xC0 -> 2
+                                else -> 3
+                            }
+                }
+                packed = packed or ((value and 0x03) shl (6 - 2 * j))
+            }
+            dst[i] = packed.toByte()
+        }
+        return dst
+    }
+
+    /** zlib-compress; falls back to uncompressed when that isn't smaller. */
+    private fun compressAdaptive(data: ByteArray): Pair<ByteArray, Int> {
+        if (data.isEmpty()) return Pair(data, NimoProtocol.COMPRESSION_NONE)
+        val deflater = Deflater()
+        deflater.setInput(data)
+        deflater.finish()
+        val out = ByteArrayOutputStream(data.size)
+        val buffer = ByteArray(4096)
+        while (!deflater.finished()) {
+            val n = deflater.deflate(buffer)
+            out.write(buffer, 0, n)
+        }
+        deflater.end()
+        val compressed = out.toByteArray()
+        return if (compressed.size < data.size) {
+            Pair(compressed, NimoProtocol.COMPRESSION_ZLIB)
+        } else {
+            Pair(data, NimoProtocol.COMPRESSION_NONE)
+        }
+    }
 }

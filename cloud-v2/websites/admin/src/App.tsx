@@ -1,21 +1,13 @@
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Bug, Check, ClipboardList, CloudUpload, FileText, FlaskConical, History, Home, Loader2, MessageSquareWarning, PackageCheck, RefreshCcw, RotateCcw, ShieldCheck, X } from "lucide-react";
+import { AlertCircle, Bug, Check, ClipboardList, CloudUpload, FileText, History, Home, Loader2, MessageSquareWarning, PackageCheck, RefreshCcw, RotateCcw, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { AppShell, type NavItem } from "@/components/app-shell";
 import { Button } from "@/components/ui/button";
 import mentraLogo from "./assets/mentra-logo.svg";
-import { api, ApiError } from "./lib/api";
-import {
-  readTestRunLink, readTestRunListScope, testRunListLocation, testRunLocation, type TestRunLink,
-} from "./lib/test-run-links";
-import { TestRunsPage } from "./pages/test-runs";
-import { FixFlowsPage } from "./pages/fix-flows";
-import { SystemHealthPage, SystemHealthSummary } from "./pages/system-health";
-import { fixFlowHref, readFixFlowLink, type FixFlowLink } from "./lib/fix-flow-links";
 
 type Environment = "debug" | "dev" | "staging" | "prod";
 type InstallPolicy = "install_once" | "keep_updated" | "mandatory";
-type AdminPageKey = "home" | "review" | "preinstalled" | "audit" | "incidents" | "test-runs" | "fix-flows" | "system-health";
+type AdminPageKey = "home" | "review" | "preinstalled" | "audit" | "incidents";
 type ReleaseStatus = "draft" | "submitted" | "in_review" | "accepted" | "rejected" | "published" | "suspended";
 
 interface AdminUser {
@@ -71,7 +63,7 @@ type ReportStatus = "collecting" | "ready" | "closed";
 
 interface ReportArtifact {
   artifactId: string;
-  type: "logs" | "screenshot" | "state_snapshot" | "video";
+  type: "logs" | "screenshot" | "state_snapshot";
   source: string;
   filename: string | null;
   contentType: string | null;
@@ -132,9 +124,6 @@ const ADMIN_NAV: readonly NavItem[] = [
   { key: "preinstalled", label: "Preinstalled miniapps", icon: PackageCheck },
   { key: "audit", label: "Audit log", icon: History },
   { key: "incidents", label: "Incident system", icon: Bug },
-  { key: "test-runs", label: "Test runs", icon: FlaskConical },
-  { key: "fix-flows", label: "Fix flows", icon: RotateCcw },
-  { key: "system-health", label: "System health", icon: ShieldCheck },
 ];
 
 /**
@@ -165,21 +154,11 @@ export function App() {
 // out the param must stay in the address bar so LoginGate's return_to brings
 // it back through the auth round-trip. Navigating between pages spends it.
 let pendingDeepLinkReportId = new URLSearchParams(window.location.search).get("report");
-const initialTestRunLink = readTestRunLink(window.location.search);
-const initialTestRunListScope = readTestRunListScope(window.location.search);
-const initialFixFlowLink = readFixFlowLink(window.location.search);
-const initialFixFlows = new URLSearchParams(window.location.search).get("fixFlows") === "active";
-const initialSystemHealth = new URLSearchParams(window.location.search).get("systemHealth") === "1";
 
 function AdminPage() {
   const qc = useQueryClient();
   const env = ENVIRONMENT;
-  const [page, setPage] = useState<AdminPageKey>(
-    initialSystemHealth ? "system-health" : initialFixFlowLink || initialFixFlows ? "fix-flows" : initialTestRunLink || initialTestRunListScope ? "test-runs" : pendingDeepLinkReportId ? "incidents" : "home",
-  );
-  const [fixFlowLink, setFixFlowLink] = useState<FixFlowLink | null>(initialFixFlowLink);
-  const [testRunLink, setTestRunLink] = useState<TestRunLink | null>(initialTestRunLink);
-  const [testRunListScope, setTestRunListScope] = useState(initialTestRunListScope);
+  const [page, setPage] = useState<AdminPageKey>(pendingDeepLinkReportId ? "incidents" : "home");
   const [deepLinkReportId, setDeepLinkReportId] = useState<string | null>(pendingDeepLinkReportId);
   const [selectedReleaseIds, setSelectedReleaseIds] = useState<Set<string>>(new Set());
   const [detailReleaseId, setDetailReleaseId] = useState<string | null>(null);
@@ -208,45 +187,9 @@ function AdminPage() {
     // the parameter to survive the auth round-trip. Idempotent on re-runs.
     if (me.isSuccess && pendingDeepLinkReportId) {
       pendingDeepLinkReportId = null;
-      const url = new URL(window.location.href);
-      url.searchParams.delete("report");
-      window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+      window.history.replaceState(null, "", window.location.pathname);
     }
   }, [me.isSuccess]);
-  useEffect(() => {
-    const restore = () => {
-      if (new URLSearchParams(window.location.search).get("systemHealth") === "1") { setPage("system-health"); return; }
-      const fixFlow = readFixFlowLink(window.location.search);
-      setFixFlowLink(fixFlow);
-      if (fixFlow || new URLSearchParams(window.location.search).get("fixFlows") === "active") {
-        setPage("fix-flows"); return;
-      }
-      const selection = readTestRunLink(window.location.search);
-      const scope = readTestRunListScope(window.location.search);
-      setTestRunLink(selection);
-      setTestRunListScope(scope);
-      if (selection || scope) setPage("test-runs");
-    };
-    window.addEventListener("popstate", restore);
-    return () => window.removeEventListener("popstate", restore);
-  }, []);
-
-  function selectFixFlow(selection: FixFlowLink | null) {
-    setFixFlowLink(selection);
-    setPage("fix-flows");
-    window.history.pushState(null, "", fixFlowHref(selection));
-  }
-
-  function selectTestRun(selection: TestRunLink | null, replace = false) {
-    setTestRunLink(selection);
-    window.history[replace ? "replaceState" : "pushState"](null, "", testRunLocation(window.location.href, selection));
-  }
-
-  function clearTestRunListScope() {
-    setTestRunListScope(null);
-    window.history.replaceState(null, "", testRunListLocation(window.location.href, null));
-  }
-
   const submissions = useQuery({
     queryKey: ["admin-submissions"],
     queryFn: () => api<{ submissions: ReleaseSummary[] }>("/api/admin/submissions"),
@@ -360,9 +303,6 @@ function AdminPage() {
     preinstalled: { title: "Preinstalled miniapps", body: "The managed default set MentraOS installs and keeps updated without a mobile app release." },
     audit: { title: "Audit log", body: "Every admin mutation: who approved, rejected, published, or promoted something." },
     incidents: { title: "Incident system", body: "Bug reports and feedback filed from the Mentra App, with their screenshots and log bundles." },
-    "test-runs": { title: "Test runs", body: "Recorded routines, build provenance, firmware checks, and fixture return state." },
-    "fix-flows": { title: "Fix flows", body: "Follow a failed routine through its incident, AI investigation, PR, review and verification." },
-    "system-health": { title: "System health", body: "Host contact, worker status, device lanes and recorded disk space." },
   };
 
   if (me.isLoading) return <Splash label="Checking admin session" />;
@@ -381,19 +321,9 @@ function AdminPage() {
       activeKey={page}
       onSelect={key => {
         setPage(key as AdminPageKey);
-        setFixFlowLink(null);
-        const location = new URL(window.location.href);
-        for (const param of ["fixFlows", "fixFlow", "fixFlowRun", "fixStep", "systemHealth"]) location.searchParams.delete(param);
-        window.history.replaceState(null, "", location.pathname + location.search);
         // Any navigation spends the deep link: coming back to the Incident
         // system page starts unselected.
         setDeepLinkReportId(null);
-        if (key !== "test-runs") {
-          selectTestRun(null, true);
-          clearTestRunListScope();
-        }
-        if (key === "fix-flows") window.history.replaceState(null, "", fixFlowHref(null));
-        if (key === "system-health") window.history.replaceState(null, "", "/?systemHealth=1");
       }}
       title={pageMeta[page].title}
       description={pageMeta[page].body}
@@ -451,13 +381,6 @@ function AdminPage() {
       {page === "audit" ? <AuditPage events={auditEvents} loading={audit.isLoading} /> : null}
 
       {page === "incidents" ? <ReportsPage initialReportId={deepLinkReportId} /> : null}
-      {page === "fix-flows" || page === "test-runs" ? <SystemHealthSummary /> : null}
-      {page === "system-health" ? <SystemHealthPage /> : null}
-      {page === "fix-flows" ? <FixFlowsPage selection={fixFlowLink} onSelect={selectFixFlow} /> : null}
-      {page === "test-runs" ? (
-        <TestRunsPage selection={testRunLink} onSelect={selectTestRun}
-          scope={testRunListScope} onClearScope={clearTestRunListScope} />
-      ) : null}
 
       {detailRelease ? (
         <SubmissionDetail
@@ -920,7 +843,7 @@ function AuditRow({ event, compact = false }: { event: AuditEvent; compact?: boo
 }
 
 function ReportsPage({ initialReportId = null }: { initialReportId?: string | null }) {
-  const [kind, setKind] = useState<"all" | ReportKind | "internal" | "testing">("all");
+  const [kind, setKind] = useState<"all" | ReportKind>("all");
   const [status, setStatus] = useState<"all" | ReportStatus>("all");
   const [detailId, setDetailId] = useState<string | null>(initialReportId);
 
@@ -943,14 +866,14 @@ function ReportsPage({ initialReportId = null }: { initialReportId?: string | nu
           <div>
             <h2 className="text-xl font-bold">User reports</h2>
             <p className="mt-1 text-sm text-[#68746d]">
-              Internal contains bugs and feedback from admin accounts. Testing contains harness reports; other automatic reports stay in Automatic.
+              Everything filed through the Mentra App reporting flow — open a report for its context, screenshots, and logs.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <FilterPills
               value={kind}
               onChange={setKind}
-              options={[["all", "All kinds"], ["bug", "Bug"], ["feedback", "Feedback"], ["internal", "Internal"], ["testing", "Testing"], ["automatic", "Automatic"]]}
+              options={[["all", "All kinds"], ["bug", "Bug"], ["feedback", "Feedback"], ["automatic", "Automatic"]]}
             />
             <FilterPills
               value={status}
@@ -974,7 +897,7 @@ function ReportsPage({ initialReportId = null }: { initialReportId?: string | nu
         ) : reports.isError ? (
           <div className="p-5"><ErrorText error={reports.error} /></div>
         ) : rows.length === 0 ? (
-          <EmptyState title="No reports" body={kind === "internal" ? "Bugs and feedback submitted by admin accounts will appear here." : kind === "testing" ? "Reports submitted by the automated testing harness will appear here." : "Reports matching these filters will appear here."} />
+          <EmptyState title="No reports" body="Bug reports and feedback submitted from the Mentra App will appear here." />
         ) : (
           <div className="divide-y divide-[#eceeeb]">
             {rows.map(report => (
@@ -1023,12 +946,12 @@ function FilterPills<T extends string>(props: {
   options: ReadonlyArray<readonly [T, string]>;
 }) {
   return (
-    <div className="flex min-h-9 flex-wrap items-center gap-1 rounded-[18px] border border-[#e0e4de] bg-[#f7f8f6] p-1">
+    <div className="flex h-9 items-center gap-1 rounded-full border border-[#e0e4de] bg-[#f7f8f6] p-1">
       {props.options.map(([value, label]) => (
         <button
           key={value}
           onClick={() => props.onChange(value)}
-          className={`h-7 whitespace-nowrap rounded-full px-3 text-xs font-semibold ${
+          className={`h-7 rounded-full px-3 text-xs font-semibold ${
             props.value === value ? "bg-white text-[#14151b] shadow-sm" : "text-[#68746d] hover:text-[#14151b]"
           }`}
         >
@@ -1096,7 +1019,7 @@ function ReportDetailDrawer(props: { reportId: string; onClose: () => void }) {
                   Artifacts ({report.artifacts.length})
                 </div>
                 {report.artifacts.length === 0 ? (
-                  <p className="mt-2 text-sm text-[#68746d]">No screenshots, videos or logs were attached.</p>
+                  <p className="mt-2 text-sm text-[#68746d]">No screenshots or logs were attached.</p>
                 ) : (
                   <div className="mt-3 space-y-4">
                     {report.artifacts.map(artifact => (
@@ -1133,11 +1056,7 @@ function isPreviewableImage(contentType: string | null | undefined): boolean {
   return PREVIEWABLE_IMAGE_TYPES.has(contentType.split(";")[0].trim().toLowerCase());
 }
 
-function isPlayableVideo(contentType: string | null | undefined): boolean {
-  return contentType?.split(";")[0].trim().toLowerCase() === "video/mp4";
-}
-
-export function ReportArtifactView({ reportId, artifact }: { reportId: string; artifact: ReportArtifact }) {
+function ReportArtifactView({ reportId, artifact }: { reportId: string; artifact: ReportArtifact }) {
   const url = `/api/admin/reports/${reportId}/artifacts/${artifact.artifactId}`;
   const header = (
     <div className="flex flex-wrap items-center gap-2 text-xs text-[#68746d]">
@@ -1159,25 +1078,6 @@ export function ReportArtifactView({ reportId, artifact }: { reportId: string; a
             loading="lazy"
             className="mt-2 max-h-72 rounded-[10px] border border-[#e0e4de] bg-white"
           />
-        </a>
-      </div>
-    );
-  }
-  if (artifact.type === "video" && isPlayableVideo(artifact.contentType)) {
-    // Same-origin artifact URL, like screenshots: the browser sends the admin
-    // session cookie and the API serves the MP4 inline.
-    return (
-      <div className="rounded-[14px] bg-[#f5f7f4] p-3">
-        {header}
-        <video
-          src={url}
-          controls
-          playsInline
-          preload="metadata"
-          className="mt-2 max-h-96 w-full rounded-[10px] border border-[#e0e4de] bg-black"
-        />
-        <a className="mt-2 inline-flex items-center gap-2 text-sm font-semibold text-[#087d50]" href={url} download>
-          <FileText className="size-4" /> Download payload
         </a>
       </div>
     );
@@ -1336,7 +1236,7 @@ function formatDate(value: string | null | undefined): string {
 }
 
 function LoginGate({ denied = false }: { denied?: boolean }) {
-  // The full URL preserves report and testRun/step deep links through the
+  // The full URL (not just the origin) so a /?report=… deep link survives the
   // login round-trip; safeReturnTo on Core validates the origin either way.
   const loginUrl = `/api/console/auth/login?return_to=${encodeURIComponent(window.location.href)}`;
 
@@ -1433,6 +1333,34 @@ function ErrorText({ error }: { error: unknown }) {
       {error instanceof Error ? error.message : "Request failed"}
     </p>
   );
+}
+
+class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+async function api<T>(path: string, opts?: { method?: string; body?: unknown }): Promise<T> {
+  const res = await fetch(path, {
+    method: opts?.method ?? "GET",
+    headers: {
+      accept: "application/json",
+      ...(opts?.body ? { "content-type": "application/json" } : {}),
+    },
+    body: opts?.body ? JSON.stringify(opts.body) : undefined,
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = await res.json() as { error_description?: string; message?: string };
+      detail = body.error_description ?? body.message ?? detail;
+    } catch {
+      // keep status detail
+    }
+    throw new ApiError(detail, res.status);
+  }
+  return res.json() as Promise<T>;
 }
 
 export default App;

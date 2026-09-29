@@ -12,13 +12,6 @@ import { DeveloperOrgMembershipModel } from "../models/developer-org-membership.
 import { RefreshTokenModel } from "../models/refresh-token.model";
 import { UserModel } from "../models/user.model";
 import { OemModel } from "../models/oem.model";
-import { TestAssetModel, TestRunModel } from "../models/test-run.model";
-import { TestRunClaimModel } from "../models/test-run-claim.model";
-import { TestDispatchModel } from "../models/test-dispatch.model";
-import { TestRepairModel } from "../models/test-repair.model";
-import { TestResourceObservationModel } from "../models/test-resource-observation.model";
-import { backfillTestRunCompletionDates } from "./test-run-completion.migration";
-import { TestHostLatestModel, TestHostSampleModel } from "../models/test-host-health.model";
 
 const logger = createLogger("core").child({ component: "startup-migrations" });
 
@@ -39,7 +32,6 @@ type DuplicateUserGroup = {
   users: Array<{
     _id: mongoose.Types.ObjectId;
     mentraUserId: string;
-    createdAt?: Date;
   }>;
   count: number;
 };
@@ -52,21 +44,6 @@ export async function runStartupMigrations(): Promise<void> {
   await UserModel.createIndexes();
   // prevTokenHash recovery-lookup index (OS-1703). Idempotent; sparse.
   await RefreshTokenModel.createIndexes();
-  // Immutable run/asset insertion relies on these uniqueness constraints before serving requests.
-  await TestRunModel.createIndexes();
-  logger.info({ migration: "test-run-completed-at", ...await backfillTestRunCompletionDates() }, "test-run completion projection ready");
-  await TestAssetModel.createIndexes();
-  // No device execution grant is safe until request IDs are unique across all Core instances.
-  await TestRunClaimModel.createIndexes();
-  // The send receipt must be unique before any admin can submit a device request.
-  await TestDispatchModel.createIndexes();
-  // A state repair operation may be sent once; its receipt must be unique first.
-  await TestRepairModel.createIndexes();
-  // One compare-and-set row per host resource requires the unique key before any report.
-  await TestResourceObservationModel.createIndexes();
-  // Passive host observations require idempotent identity and indexed, expiring history before ingestion.
-  await TestHostSampleModel.createIndexes();
-  await TestHostLatestModel.createIndexes();
   await dropLegacyMembershipEmailIndex();
   await dedupeDeveloperOrgMemberships();
   // Build the unique index BEFORE any upserts so concurrent Core startups can't
@@ -383,10 +360,11 @@ async function dedupeUserIdentityRows(): Promise<void> {
           tenantUserId: { $type: "string" },
         },
       },
+      { $sort: { createdAt: 1, _id: 1 } },
       {
         $group: {
           _id: { tenantId: "$tenantId", tenantUserId: "$tenantUserId" },
-          users: { $push: { _id: "$_id", mentraUserId: "$mentraUserId", createdAt: "$createdAt" } },
+          users: { $push: { _id: "$_id", mentraUserId: "$mentraUserId" } },
           count: { $sum: 1 },
         },
       },
@@ -398,13 +376,7 @@ async function dedupeUserIdentityRows(): Promise<void> {
   let updatedRefreshTokenCount = 0;
 
   for (const group of duplicateGroups) {
-    // Sort each duplicate group in-process. Cosmos DB's Mongo API rejects the
-    // former collection-wide {createdAt,_id} aggregation sort unless customers
-    // manually provision a composite index, even for a fresh empty database.
-    const [keeper, ...duplicates] = [...group.users].sort((left, right) => {
-      const createdAtDelta = (left.createdAt?.getTime() ?? 0) - (right.createdAt?.getTime() ?? 0);
-      return createdAtDelta || left._id.toString().localeCompare(right._id.toString());
-    });
+    const [keeper, ...duplicates] = group.users;
     if (!keeper || duplicates.length === 0) continue;
 
     const duplicateUserIds = duplicates.map((user) => user.mentraUserId);

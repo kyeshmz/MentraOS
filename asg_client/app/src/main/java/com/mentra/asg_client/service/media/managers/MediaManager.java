@@ -3,9 +3,6 @@ package com.mentra.asg_client.service.media.managers;
 import android.content.Context;
 import android.util.Log;
 import com.mentra.asg_client.AsgConstants;
-import com.mentra.asg_client.io.streaming.StreamStatusSnapshot;
-import com.mentra.asg_client.io.streaming.StreamTelemetryPolicy;
-import com.mentra.asg_client.service.utils.ProcessSessionId;
 import com.mentra.asg_client.io.streaming.events.StreamingCommand;
 import com.mentra.asg_client.io.streaming.interfaces.StreamingStatusCallback;
 import com.mentra.asg_client.io.streaming.services.RtmpStreamingService;
@@ -30,38 +27,6 @@ public class MediaManager implements IMediaManager {
     private final Context context;
     private final AsgClientServiceManager serviceManager;
     private final StreamingStatusCallback streamingStatusCallback;
-    private final StreamStatusSnapshot mStreamSnapshot = new StreamStatusSnapshot(ProcessSessionId.SID);
-    private volatile java.util.function.Consumer<JSONObject> mStreamStatusListener;
-
-    @Override
-    public void beginStreamSession(String streamId) {
-        mStreamSnapshot.begin(streamId);
-    }
-
-    @Override
-    public JSONObject getStreamSnapshot() {
-        return mStreamSnapshot.snapshot();
-    }
-
-    @Override
-    public void setStreamStatusListener(java.util.function.Consumer<JSONObject> listener) {
-        mStreamStatusListener = listener;
-    }
-
-    private void publishStreamStatus(JSONObject status) {
-        if (!mStreamSnapshot.update(status)) return;
-        JSONObject snapshot = mStreamSnapshot.snapshot();
-        try {
-            snapshot.put("kind", "event");
-            snapshot.remove("streaming");
-            snapshot.remove("reconnecting");
-        } catch (JSONException e) {
-            throw new IllegalStateException(e);
-        }
-        java.util.function.Consumer<JSONObject> listener = mStreamStatusListener;
-        if (listener != null) listener.accept(snapshot);
-        sendStreamStatusResponse(true, snapshot);
-    }
 
     public MediaManager(Context context, AsgClientServiceManager serviceManager) {
         this.context = context;
@@ -314,7 +279,7 @@ public class MediaManager implements IMediaManager {
                     status.put("type", "stream_status");
                     status.put("status", "initializing");
                     if (streamId != null && !streamId.isEmpty()) status.put("streamId", streamId);
-                    publishStreamStatus(status);
+                    sendStreamStatusResponse(true, status);
                 } catch (JSONException e) {
                     Log.e(TAG, "Error creating stream initializing status", e);
                 }
@@ -328,7 +293,7 @@ public class MediaManager implements IMediaManager {
                     status.put("type", "stream_status");
                     status.put("status", "streaming");
                     if (streamId != null && !streamId.isEmpty()) status.put("streamId", streamId);
-                    publishStreamStatus(status);
+                    sendStreamStatusResponse(true, status);
                 } catch (JSONException e) {
                     Log.e(TAG, "Error creating stream started status", e);
                 }
@@ -337,14 +302,19 @@ public class MediaManager implements IMediaManager {
             @Override
             public void onStreamStopped(String streamId) {
                 Log.d(TAG, "Stream stopped");
-                // Services suppress teardown callbacks for their own reconnect attempts. Never
-                // suppress this stream's stop because an unrelated service is reconnecting.
+                // Don't send "stopped" if we're mid-reconnect
+                if (RtmpStreamingService.isReconnecting()
+                        || SrtStreamingService.isReconnecting()
+                        || WhipStreamingService.isReconnecting()) {
+                    Log.d(TAG, "Stream stopped for reconnection - skipping stopped status");
+                    return;
+                }
                 try {
                     JSONObject status = new JSONObject();
                     status.put("type", "stream_status");
                     status.put("status", "stopped");
                     if (streamId != null && !streamId.isEmpty()) status.put("streamId", streamId);
-                    publishStreamStatus(status);
+                    sendStreamStatusResponse(true, status);
                 } catch (JSONException e) {
                     Log.e(TAG, "Error creating stream stopped status", e);
                 }
@@ -369,7 +339,7 @@ public class MediaManager implements IMediaManager {
                     status.put("maxAttempts", maxAttempts);
                     status.put("reason", reason);
                     if (streamId != null && !streamId.isEmpty()) status.put("streamId", streamId);
-                    publishStreamStatus(status);
+                    sendStreamStatusResponse(true, status);
                 } catch (JSONException e) {
                     Log.e(TAG, "Error creating stream reconnecting status", e);
                 }
@@ -384,7 +354,7 @@ public class MediaManager implements IMediaManager {
                     status.put("status", "reconnected");
                     status.put("attempt", attempt);
                     if (streamId != null && !streamId.isEmpty()) status.put("streamId", streamId);
-                    publishStreamStatus(status);
+                    sendStreamStatusResponse(true, status);
                 } catch (JSONException e) {
                     Log.e(TAG, "Error creating stream reconnected status", e);
                 }
@@ -399,7 +369,7 @@ public class MediaManager implements IMediaManager {
                     status.put("status", "reconnect_failed");
                     status.put("maxAttempts", maxAttempts);
                     if (streamId != null && !streamId.isEmpty()) status.put("streamId", streamId);
-                    publishStreamStatus(status);
+                    sendStreamStatusResponse(false, status);
                 } catch (JSONException e) {
                     Log.e(TAG, "Error creating stream reconnect failed status", e);
                 }
@@ -417,7 +387,7 @@ public class MediaManager implements IMediaManager {
                     // Additive field: the phone treats an id-carrying error as terminal
                     // unless the glasses flag that a reconnect is already scheduled.
                     if (willRetry) status.put("willRetry", true);
-                    publishStreamStatus(status);
+                    sendStreamStatusResponse(false, status);
                 } catch (JSONException e) {
                     Log.e(TAG, "Error creating stream error status", e);
                 }
@@ -431,7 +401,7 @@ public class MediaManager implements IMediaManager {
                     long droppedFrames,
                     long durationSeconds,
                     double temperatureC) {
-                if (!StreamTelemetryPolicy.isEnabled()) {
+                if (!AsgConstants.ENABLE_PIPELINE_FPS_TELEMETRY) {
                     return;
                 }
                 try {
@@ -451,7 +421,7 @@ public class MediaManager implements IMediaManager {
                         stats.put("temperatureC", Math.round(temperatureC * 10d) / 10d);
                     }
                     status.put("stats", stats);
-                    publishStreamStatus(status);
+                    sendStreamStatusResponse(true, status);
                 } catch (JSONException e) {
                     Log.e(TAG, "Error creating stream metrics status", e);
                 }

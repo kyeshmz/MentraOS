@@ -108,10 +108,9 @@ run_setup() {
     pod deintegrate || true  # Ignore errors if no existing integration
     pod cache clean --all || true  # Clean pod cache
     
-    # Install pods with repo update to resolve WebRTC-SDK version conflicts.
-    # Prefetch Folly/boost as GitHub tarballs so git clone timeouts don't abort.
+    # Install pods with repo update to resolve WebRTC-SDK version conflicts
     print_status "Installing pods with updated dependencies..."
-    bun ../scripts/cocoapods-install.mjs --repo-update
+    pod install --repo-update
     
     cd ..
     print_success "CocoaPods dependencies installed"
@@ -154,7 +153,7 @@ fix_pod_conflicts() {
     
     # Install with repo update to get latest compatible versions
     print_status "Installing pods with updated dependencies..."
-    bun ../scripts/cocoapods-install.mjs --repo-update
+    pod install --repo-update
     
     cd ..
     print_success "CocoaPods dependency conflicts resolved"

@@ -396,7 +396,6 @@ const mockIslandEntries = () => {
   const main = {
     __esModule: true,
     ...realEngineTypes,
-    getAppBuildInfo: jest.requireActual("./modules/engine/src/utils/appBuildInfo").getAppBuildInfo,
     // OTA install policy (timings + failure copy) + deriveDisplayState — real (pure)
     // implementations, consumed by the host otaProgressTimeouts shim + OTA tests.
     ...realOtaInstallPolicy,
@@ -456,7 +455,6 @@ const mockIslandEntries = () => {
         status: jest.fn(() => ({state: "disconnected"})),
         onStatus: jest.fn(() => () => {}),
         info: jest.fn(() => ({})),
-        onInfo: jest.fn(() => () => {}),
         capabilities: jest.fn(() => ({})),
         requestVersionInfo: jest.fn(() => Promise.resolve()),
         onButtonPress: subscribeVia("button_press"),
@@ -522,13 +520,6 @@ const mockIslandEntries = () => {
         requirementsForMiniapp: jest.fn(() => Promise.resolve([])),
       },
       phoneNotifications: {
-        setPresentationActive: jest.fn(),
-        presentNative: jest.fn(() => Promise.resolve(false)),
-        usesNativePresentation: jest.fn(() => false),
-        nativeCapabilities: jest.fn(() => ({supported: false})),
-        nativeStatus: jest.fn(() => Promise.resolve({supported: false, state: "unavailable"})),
-        onNativeStatus: jest.fn(() => () => {}),
-        onNativeDelivery: jest.fn(() => () => {}),
         enabled: jest.fn(() => false),
         setEnabled: jest.fn(() => Promise.resolve({is_ok: () => true})),
         installedApps: jest.fn(() => Promise.resolve([])),
@@ -578,7 +569,6 @@ const mockIslandEntries = () => {
         onIdentity: jest.fn((cb) => realPairingIdentity.subscribePairingIdentity(cb)),
         markPendingSelection: jest.fn((model) => realPairingIdentity.markPendingSelection(model)),
         scan: jest.fn(),
-        diagnoseEmptyScan: jest.fn(() => Promise.resolve(null)),
         scanning: jest.fn(() => false),
         searchResults: jest.fn(() => []),
         onFound: jest.fn(() => () => {}),
@@ -780,7 +770,6 @@ const mockIslandEntries = () => {
     useStop: jest.fn(() => appStatusState.stop),
     sortAppsByLastOpenTime: jest.fn((apps) => apps),
     decideDevLaunchRoute: jest.fn(),
-    decideDevOpenRoute: jest.fn(),
     HardwareCompatibility: {
       checkCompatibility: jest.fn(() => ({
         isCompatible: true,

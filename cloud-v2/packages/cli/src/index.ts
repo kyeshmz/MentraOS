@@ -486,9 +486,7 @@ program
   .description("Start the local miniapp dev server with signed Cloud V2 identity when logged in")
   .option("--cwd <path>", "miniapp project directory", process.cwd())
   .option("--auth", "require signed dev auto-auth setup before starting")
-  .option("--usb", "reach the phone over USB via adb reverse instead of the LAN (Android only)")
-  .option("--device <serial>", "target a specific adb device serial (use with --usb)")
-  .action(async (options: { cwd: string; auth?: boolean; usb?: boolean; device?: string }) => {
+  .action(async (options: { cwd: string; auth?: boolean }) => {
     const cwd = resolve(options.cwd);
     try {
       const manifest = readManifest(cwd);
@@ -516,7 +514,7 @@ program
         console.log("Dev auto-auth disabled. Run `mentra login` if this miniapp uses session.auth.");
       }
 
-      await devMiniapp({ cwd, signDevAttestation: signer, usb: options.usb, device: options.device });
+      await devMiniapp({ cwd, signDevAttestation: signer });
     } catch (error) {
       fail(error);
     }

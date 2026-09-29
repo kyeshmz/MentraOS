@@ -1,6 +1,5 @@
 export {
   MentraLiveOtaFlow,
-  MentraLiveOtaPreview,
   type MentraLiveOtaFlowPage,
   type MentraLiveOtaFlowProps,
   type MentraLiveOtaFlowTheme,

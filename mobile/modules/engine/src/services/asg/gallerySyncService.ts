@@ -11,7 +11,7 @@ import {AppState, AppStateStatus, Platform} from "react-native"
 import BleManager from "react-native-ble-manager"
 import WifiManager from "react-native-wifi-reborn"
 
-import {useGallerySyncStore, HotspotInfo, selectIssyncing} from "../../stores/gallerySync"
+import {useGallerySyncStore, HotspotInfo} from "../../stores/gallerySync"
 import {selectGlassesConnected, useGlassesStore} from "../../stores/glasses"
 import {isGlassesConnected} from "../GlassesReadiness"
 import {SETTINGS, useSettingsStore} from "../../stores/settings"
@@ -33,83 +33,6 @@ import {validateCaptureMetadataForDownload} from "./galleryMediaValidation"
 import {emitGalleryNotice} from "./galleryNotices"
 import {galleryTransferLedger} from "./galleryTransferLedger"
 import {cameraRollExportCoordinator} from "./cameraRollExportCoordinator"
-
-export type IosHotspotSsidVerification = {
-  status: "matched" | "mismatched" | "unavailable"
-  lastSeenSsid: string
-  /**
-   * Only true when reads hit a Location PERMISSION wall. `unavailable` alone is a weaker
-   * claim — it also covers "every read failed transiently" and "every read came back
-   * empty", which can happen with Location fully granted. Callers must not blame Location
-   * (or disable later SSID gates) on the strength of `status` alone.
-   */
-  permissionBlocked: boolean
-}
-
-/**
- * react-native-wifi-reborn rejects SSID reads with a stable `code` from its CONNECT_ERRORS
- * enum. Three DIFFERENT prose messages map to the same "this install will never be allowed
- * to read the SSID" wall — "Cannot detect SSID because LocationPermission is Denied",
- * "...is Restricted", and the bare "Permission not granted" from the not-determined path —
- * so match the code, never the text.
- */
-const SSID_PERMISSION_ERROR_CODES = new Set([
-  "locationPermissionDenied",
-  "locationPermissionRestricted",
-  "locationPermissionMissing",
-])
-
-export function isSsidPermissionError(error: unknown): boolean {
-  const code = (error as {code?: unknown} | null | undefined)?.code
-  // A bridged `code` is authoritative: `couldNotDetectSSID` is a transient read failure,
-  // NOT a permission wall, and must keep polling.
-  if (typeof code === "string") return SSID_PERMISSION_ERROR_CODES.has(code)
-
-  // Fallback for errors that reach us with only a message (older bridges, test doubles).
-  const message = error instanceof Error ? error.message : String(error)
-  return /location\s*permission/i.test(message) || /permission not granted/i.test(message)
-}
-
-export async function verifyIosHotspotSsid(
-  targetSsid: string,
-  readCurrentSsid: (attempt: number) => Promise<string>,
-  sleep: () => Promise<void>,
-  maxAttempts = 30,
-): Promise<IosHotspotSsidVerification> {
-  let lastSeenSsid = "unknown"
-  let observedSsid = false
-
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    try {
-      const currentSsid = await readCurrentSsid(attempt + 1)
-      // Only a NON-EMPTY read proves we can see the network. An empty SSID is an
-      // "unknown", not a mismatch — reporting it as a mismatch would hard-fail the sync
-      // for the same reason this fallback exists.
-      if (currentSsid) {
-        observedSsid = true
-        lastSeenSsid = currentSsid
-      } else {
-        lastSeenSsid = "null"
-      }
-
-      if (currentSsid && currentSsid === targetSsid) {
-        return {status: "matched", lastSeenSsid, permissionBlocked: false}
-      }
-    } catch (error) {
-      lastSeenSsid = "error"
-      if (isSsidPermissionError(error)) {
-        return {status: "unavailable", lastSeenSsid, permissionBlocked: true}
-      }
-    }
-
-    if (attempt < maxAttempts - 1) await sleep()
-  }
-
-  // Falling out of the loop without a single legible SSID is "we never saw the network",
-  // NOT "we are not allowed to look" — transient read failures and empty reads land here
-  // with Location granted, so permissionBlocked stays false.
-  return {status: observedSsid ? "mismatched" : "unavailable", lastSeenSsid, permissionBlocked: false}
-}
 
 // Timing constants
 const TIMING = {
@@ -156,11 +79,6 @@ class GallerySyncService {
   private wifiSettingsOpenedAt: number | null = null // Timestamp when user was sent to WiFi settings
   private syncStartPromise: Promise<void> | null = null
   private startAborted = false
-  // Authoritative answer to "can this run read the phone's WiFi SSID?", captured from the
-  // Location permission gate in pre-flight. Every SSID comparison below is advisory only:
-  // when this is false we skip the read entirely and lean on the glasses connectivity
-  // probe instead of failing the sync. Assume readable until pre-flight says otherwise.
-  private ssidReadable = true
 
   private constructor() {}
 
@@ -239,11 +157,9 @@ class GallerySyncService {
 
     this.syncStartPromise = null
     useGallerySyncStore.getState().setSyncStarting(false)
-    useGallerySyncStore.getState().clearGlassesGalleryStatus()
     this.waitingForWifiRetry = false
     this.wifiSettingsOpenedAt = null
     this.startAborted = false
-    this.ssidReadable = true
     this.isInitialized = false
     console.log("[GallerySyncService] Cleaned up")
   }
@@ -253,9 +169,6 @@ class GallerySyncService {
    */
   private handleGlassesDisconnected = (): void => {
     const store = useGallerySyncStore.getState()
-    // Counts belong to this connection even when no gallery screen or sync is
-    // active. Keep them unknown until the next connection reports its summary.
-    store.clearGlassesGalleryStatus()
 
     // Pre-flight has no sync state yet — abort quietly; runStartSync checks this flag after awaits
     if (this.syncStartPromise && !this.isSyncing()) {
@@ -372,7 +285,6 @@ class GallerySyncService {
    * Handle gallery status from glasses
    */
   private handleGalleryStatus = (data: any): void => {
-    if (!isGlassesConnected(useGlassesStore.getState().connection)) return
     console.log("[GallerySyncService] Received gallery_status:", data)
 
     const store = useGallerySyncStore.getState()
@@ -566,7 +478,11 @@ class GallerySyncService {
         : null
 
     // R1: Check if already syncing (including requesting_hotspot to prevent double-tap)
-    if (this.isSyncing()) {
+    if (
+      store.syncState === "syncing" ||
+      store.syncState === "connecting_wifi" ||
+      store.syncState === "requesting_hotspot"
+    ) {
       console.log(`[GallerySyncService] ⚠️ Already syncing (state: ${store.syncState}), ignoring start request`)
       return
     }
@@ -606,23 +522,19 @@ class GallerySyncService {
     }
     console.log("[GallerySyncService]   ✅ Notification permission handled")
 
-    // 2. Location permission (required to read WiFi SSID for hotspot verification).
-    // Sync does NOT block on this: record the answer once, here, and let every downstream
-    // SSID check consult `this.ssidReadable` instead of re-deriving it from a native error.
+    // 2. Location permission (required to read WiFi SSID for hotspot verification)
     console.log("[GallerySyncService]   📍 Checking location permission...")
     const hasLocationPermission = await permissions.check(PermissionFeatures.LOCATION)
     if (!hasLocationPermission) {
       console.log("[GallerySyncService]   ⚠️ Location permission not granted - requesting...")
       const granted = await permissions.request(PermissionFeatures.LOCATION)
-      this.ssidReadable = granted
       if (!granted) {
-        console.warn("[GallerySyncService]   ❌ Location permission denied - skipping all SSID verification")
-        console.warn("[GallerySyncService]   ➡️ Falling back to the glasses connectivity probe")
+        console.warn("[GallerySyncService]   ❌ Location permission denied - WiFi SSID verification may fail")
+        // Don't block sync - we'll try anyway and fall back to IP-based verification if needed
       } else {
         console.log("[GallerySyncService]   ✅ Location permission granted")
       }
     } else {
-      this.ssidReadable = true
       console.log("[GallerySyncService]   ✅ Location permission already granted")
     }
     if (this.shouldAbortPreFlight()) {
@@ -827,51 +739,34 @@ class GallerySyncService {
         : null
 
     let isAlreadyConnected = false
-    // Distinct from `!isAlreadyConnected`: we could not READ the SSID, so we know nothing
-    // about which network the phone is on. Re-requesting the hotspot in that state costs a
-    // pointless BLE round-trip on every sync, so route straight to the connect path instead.
-    let hotspotMembershipUnknown = false
     if (currentGlassesHotspot) {
       console.log("[GallerySyncService]   📊 Glasses hotspot status:")
       console.log("[GallerySyncService]      - Enabled: true")
       console.log(`[GallerySyncService]      - SSID: ${currentGlassesHotspot.ssid}`)
       console.log(`[GallerySyncService]      - IP: ${currentGlassesHotspot.ip}`)
 
-      if (!this.ssidReadable) {
-        console.log("[GallerySyncService]   ⚠️ SSID unreadable (Location denied) - cannot tell if already joined")
-        console.log("[GallerySyncService]   ➡️ Will attempt the glasses WiFi connection directly")
-        hotspotMembershipUnknown = true
-      } else {
-        try {
-          const currentSSID = await WifiManager.getCurrentWifiSSID()
-          if (this.shouldAbortPreFlight()) {
-            console.log("[GallerySyncService] Pre-flight aborted after SSID check")
-            return
-          }
-          console.log(`[GallerySyncService]   📱 Phone current WiFi SSID: "${currentSSID}"`)
-          console.log(`[GallerySyncService]   🔍 Comparing with glasses hotspot SSID: "${currentGlassesHotspot.ssid}"`)
-
-          isAlreadyConnected = currentSSID === currentGlassesHotspot.ssid
-          if (isAlreadyConnected) {
-            console.log("[GallerySyncService]   ✅ Phone is already connected to glasses hotspot!")
-          } else if (currentSSID) {
-            console.log(`[GallerySyncService]   ⚠️ Phone is on different network (${currentSSID})`)
-            console.log("[GallerySyncService]   ➡️ Will request hotspot connection")
-          } else {
-            console.log("[GallerySyncService]   ⚠️ Phone not connected to any WiFi network")
-          }
-        } catch (error) {
-          console.warn("[GallerySyncService]   ⚠️ Could not verify current WiFi SSID:", error)
-          isAlreadyConnected = false
-          // Permission was granted at pre-flight but the read still hit a wall (revoked
-          // between the two, or a platform we mis-predicted). Latch it so the rest of this
-          // sync stops paying for reads that cannot succeed, and treat membership as
-          // unknown rather than "definitely not joined".
-          if (isSsidPermissionError(error)) {
-            this.ssidReadable = false
-            hotspotMembershipUnknown = true
-          }
+      try {
+        const currentSSID = await WifiManager.getCurrentWifiSSID()
+        if (this.shouldAbortPreFlight()) {
+          console.log("[GallerySyncService] Pre-flight aborted after SSID check")
+          return
         }
+        console.log(`[GallerySyncService]   📱 Phone current WiFi SSID: "${currentSSID}"`)
+        console.log(`[GallerySyncService]   🔍 Comparing with glasses hotspot SSID: "${currentGlassesHotspot.ssid}"`)
+
+        isAlreadyConnected = currentSSID === currentGlassesHotspot.ssid
+        if (isAlreadyConnected) {
+          console.log("[GallerySyncService]   ✅ Phone is already connected to glasses hotspot!")
+        } else if (currentSSID) {
+          console.log(`[GallerySyncService]   ⚠️ Phone is on different network (${currentSSID})`)
+          console.log("[GallerySyncService]   ➡️ Will request hotspot connection")
+        } else {
+          console.log("[GallerySyncService]   ⚠️ Phone not connected to any WiFi network")
+        }
+      } catch (error) {
+        console.warn("[GallerySyncService]   ⚠️ Could not verify current WiFi SSID:", error)
+        // If we can't verify, don't assume we're connected - request hotspot
+        isAlreadyConnected = false
       }
     } else {
       console.log("[GallerySyncService]   ℹ️ Glasses hotspot not currently enabled")
@@ -881,18 +776,6 @@ class GallerySyncService {
     // Every fallible pre-flight gate has passed. It is now safe to replace the previous
     // in-memory queue; startFileDownload immediately recovers its durable ledger work.
     mediaProcessingQueue.reset()
-
-    // SSID unreadable + hotspot already up: connectToHotspotWifi handles BOTH "already
-    // joined" (the native connect resolves immediately) and "needs to join", and it still
-    // probes the glasses server before downloading. Skipping straight to startFileDownload
-    // would be unsafe here — nothing has proven connectivity yet.
-    if (hotspotMembershipUnknown && currentGlassesHotspot) {
-      const hotspotInfo: HotspotInfo = currentGlassesHotspot
-      store.setHotspotInfo(hotspotInfo)
-      store.setSyncState("connecting_wifi")
-      await this.connectToHotspotWifi(hotspotInfo)
-      return
-    }
 
     if (isAlreadyConnected && currentGlassesHotspot) {
       const hotspotInfo: HotspotInfo = currentGlassesHotspot
@@ -1053,38 +936,30 @@ class GallerySyncService {
           console.log(`[GallerySyncService] ⏱️ Time since WiFi phase started: ${Date.now() - wifiConnectStartTime}ms`)
           console.log(`[GallerySyncService] 📱 App backgrounded during connection: ${appBackgrounded}`)
 
-          // Check current WiFi state before attempting connection. This is a shortcut, not
-          // a gate — when the SSID is unreadable we simply fall through to the connect call,
-          // which is itself a no-op if the phone is already on the target network.
-          if (!this.ssidReadable) {
-            console.log("[GallerySyncService] 📡 Skipping pre-connect SSID read (Location denied)")
-          } else {
-            try {
-              const preConnectSSID = await WifiManager.getCurrentWifiSSID()
-              console.log(`[GallerySyncService] 📡 Current WiFi SSID: "${preConnectSSID}"`)
+          // Check current WiFi state before attempting connection
+          let preConnectSSID = "unknown"
+          try {
+            preConnectSSID = await WifiManager.getCurrentWifiSSID()
+            console.log(`[GallerySyncService] 📡 Current WiFi SSID: "${preConnectSSID}"`)
 
-              // Check if already connected (shouldn't happen, but good to verify)
-              if (!localNetworkTransport.supportsScopedConnection() && preConnectSSID === hotspotInfo.ssid) {
-                console.log("[GallerySyncService] ✅ Already connected to target SSID! Proceeding to download.")
-                appStateSubscription.remove()
+            // Check if already connected (shouldn't happen, but good to verify)
+            if (!localNetworkTransport.supportsScopedConnection() && preConnectSSID === hotspotInfo.ssid) {
+              console.log("[GallerySyncService] ✅ Already connected to target SSID! Proceeding to download.")
+              appStateSubscription.remove()
 
-                const totalWifiDuration = Date.now() - wifiConnectStartTime
-                console.log("[GallerySyncService] ========================================")
-                console.log("[GallerySyncService] ✅ WIFI CONNECTION COMPLETE (already connected)")
-                console.log("[GallerySyncService] ========================================")
-                console.log(`[GallerySyncService] ⏱️ Total WiFi phase duration: ${totalWifiDuration}ms`)
-                console.log(`[GallerySyncService] 🚀 Proceeding to file download from ${hotspotInfo.ip}:8089`)
+              const totalWifiDuration = Date.now() - wifiConnectStartTime
+              console.log("[GallerySyncService] ========================================")
+              console.log("[GallerySyncService] ✅ WIFI CONNECTION COMPLETE (already connected)")
+              console.log("[GallerySyncService] ========================================")
+              console.log(`[GallerySyncService] ⏱️ Total WiFi phase duration: ${totalWifiDuration}ms`)
+              console.log(`[GallerySyncService] 🚀 Proceeding to file download from ${hotspotInfo.ip}:8089`)
 
-                await this.startFileDownload(hotspotInfo)
-                return // Exit function successfully
-              }
-            } catch (preError: unknown) {
-              const message = preError instanceof Error ? preError.message : String(preError)
-              console.warn(`[GallerySyncService] ⚠️ Could not get current SSID: ${message}`)
-              console.warn("[GallerySyncService] ⚠️ Error code:", (preError as {code?: unknown} | null)?.code)
-              // A permission wall here applies to every later read too — stop paying for it.
-              if (isSsidPermissionError(preError)) this.ssidReadable = false
+              await this.startFileDownload(hotspotInfo)
+              return // Exit function successfully
             }
+          } catch (preError: any) {
+            console.warn(`[GallerySyncService] ⚠️ Could not get current SSID: ${preError?.message}`)
+            console.warn("[GallerySyncService] ⚠️ Error code:", preError?.code)
           }
 
           console.log(`[GallerySyncService] 🔌 Connecting the glasses-local transport...`)
@@ -1109,67 +984,64 @@ class GallerySyncService {
               `[GallerySyncService] ⏱️ Time until backgrounding: ${appBackgroundTime - connectCallStartTime}ms`,
             )
           }
-          // NOTE: react-native-wifi-reborn >= 4.x already polls the SSID natively inside
-          // connectToProtectedSSID (up to 20 x 500ms) and only resolves once it observes the
-          // target network, so reaching this line is itself decent evidence of a real join.
-          // The poll below is a second opinion, not the primary gate — never fail on it
-          // when the SSID simply cannot be read.
+          console.log(`[GallerySyncService] 📝 Note: On iOS, this does NOT guarantee actual connection!`)
 
-          if (Platform.OS === "ios" && !this.ssidReadable) {
-            console.log(
-              `[GallerySyncService] 🍎 Skipping SSID verification (Location denied) - using glasses connectivity probe`,
-            )
-          } else if (Platform.OS === "ios") {
+          // iOS-specific: Verify actual WiFi connection by polling SSID
+          // The library promise resolves when iOS ACCEPTS the request, not when connection completes
+          if (Platform.OS === "ios") {
             console.log(`[GallerySyncService] 🍎 iOS: Starting connection verification...`)
             console.log(`[GallerySyncService] 🍎 Will poll getCurrentWifiSSID() for up to 15 seconds`)
 
             const maxVerifyAttempts = 30 // 30 × 500ms = 15 seconds
-            const verification = await verifyIosHotspotSsid(
-              hotspotInfo.ssid,
-              async (pollNumber) => {
-                try {
-                  const currentSsid = await WifiManager.getCurrentWifiSSID()
-                  console.log(
-                    `[GallerySyncService] 🍎 Verify poll ${pollNumber}/${maxVerifyAttempts}: Current="${currentSsid}", Target="${hotspotInfo.ssid}"`,
-                  )
-                  return currentSsid
-                } catch (error: unknown) {
-                  const message = error instanceof Error ? error.message : String(error)
-                  console.log(`[GallerySyncService] 🍎 ⚠️ Poll ${pollNumber}: Could not check SSID: ${message}`)
-                  throw error
-                }
-              },
-              () => new Promise<void>((resolve) => BgTimer.setTimeout(() => resolve(), 500)),
-              maxVerifyAttempts,
-            )
+            let connected = false
+            let lastSeenSSID = "unknown"
 
-            if (verification.status === "mismatched") {
+            for (let i = 0; i < maxVerifyAttempts; i++) {
+              try {
+                const currentSSID = await WifiManager.getCurrentWifiSSID()
+                lastSeenSSID = currentSSID || "null"
+
+                console.log(
+                  `[GallerySyncService] 🍎 Verify poll ${
+                    i + 1
+                  }/${maxVerifyAttempts}: Current="${currentSSID}", Target="${hotspotInfo.ssid}"`,
+                )
+
+                if (currentSSID === hotspotInfo.ssid) {
+                  console.log(
+                    `[GallerySyncService] 🍎 ✅ VERIFICATION SUCCESS! Connected to target network after ${
+                      (i + 1) * 500
+                    }ms`,
+                  )
+                  connected = true
+                  break
+                } else if (i === 0 && currentSSID === lastSeenSSID) {
+                  console.log(
+                    `[GallerySyncService] 🍎 ⚠️ Still on original network - iOS dialog may not have appeared yet`,
+                  )
+                }
+              } catch (ssidError: any) {
+                console.log(`[GallerySyncService] 🍎 ⚠️ Poll ${i + 1}: Could not check SSID: ${ssidError?.message}`)
+                lastSeenSSID = "error"
+              }
+
+              // Don't wait after last attempt
+              if (i < maxVerifyAttempts - 1) {
+                await new Promise<void>((resolve) => BgTimer.setTimeout(() => resolve(), 500))
+              }
+            }
+
+            if (!connected) {
               console.error(`[GallerySyncService] 🍎 ❌ VERIFICATION FAILED after 15 seconds`)
-              console.error(`[GallerySyncService] 🍎 Last seen SSID: "${verification.lastSeenSsid}"`)
+              console.error(`[GallerySyncService] 🍎 Last seen SSID: "${lastSeenSSID}"`)
               console.error(`[GallerySyncService] 🍎 Expected SSID: "${hotspotInfo.ssid}"`)
               console.error(`[GallerySyncService] 🍎 Possible causes:`)
               console.error(`[GallerySyncService] 🍎   1. User did not tap "Join" on iOS WiFi dialog`)
-              console.error(`[GallerySyncService] 🍎   2. iOS dialog did not appear`)
+              console.error(`[GallerySyncService] 🍎   2. iOS dialog did not appear (permission issue?)`)
               console.error(`[GallerySyncService] 🍎   3. iOS refused to switch networks`)
               throw new Error(
-                `iOS WiFi verification failed - still on "${verification.lastSeenSsid}", expected "${hotspotInfo.ssid}"`,
+                `iOS WiFi verification failed - still on "${lastSeenSSID}", expected "${hotspotInfo.ssid}"`,
               )
-            }
-
-            if (verification.status === "unavailable") {
-              console.warn(
-                `[GallerySyncService] 🍎 SSID inspection unavailable; using glasses connectivity probe instead`,
-              )
-              // Latch ONLY on a real permission wall (revoked between pre-flight and now).
-              // A run of transient or empty reads must leave `ssidReadable` alone: killing
-              // it here would disable the readable-mismatch gate for the remaining retries
-              // and make a later failure blame Location while it is granted.
-              if (verification.permissionBlocked) {
-                console.warn(`[GallerySyncService] 🍎 Location permission was revoked mid-sync - skipping SSID gates`)
-                this.ssidReadable = false
-              }
-            } else {
-              console.log(`[GallerySyncService] 🍎 ✅ SSID verification succeeded`)
             }
           }
 
@@ -1182,35 +1054,25 @@ class GallerySyncService {
           appStateSubscription.remove()
           console.log("[GallerySyncService] 👂 App state listener removed")
 
-          // Final verification: Check SSID one more time before starting download.
-          // Only the READ is allowed to fail softly. A readable SSID that does not match is
-          // a real "we are about to download from the wrong network" signal and must abort —
-          // previously the throw was inside the try, so its own catch swallowed it and the
-          // gate never actually stopped anything.
-          let finalSSID: string | null = null
-          if (!this.ssidReadable) {
-            console.log("[GallerySyncService] 📶 Skipping final SSID check (Location denied)")
-          } else {
-            try {
-              finalSSID = localNetworkTransport.isScopedConnectionActive()
-                ? hotspotInfo.ssid
-                : await WifiManager.getCurrentWifiSSID()
-              console.log(`[GallerySyncService] 📶 Final SSID check before download: "${finalSSID}"`)
-            } catch (finalError: unknown) {
-              const message = finalError instanceof Error ? finalError.message : String(finalError)
-              console.warn(`[GallerySyncService] ⚠️ Could not perform final SSID check: ${message}`)
-              // Continue anyway - we've done our best to verify
+          // Final verification: Check SSID one more time before starting download
+          try {
+            const finalSSID = localNetworkTransport.isScopedConnectionActive()
+              ? hotspotInfo.ssid
+              : await WifiManager.getCurrentWifiSSID()
+            console.log(`[GallerySyncService] 📶 Final SSID check before download: "${finalSSID}"`)
+            if (Platform.OS === "android") {
+              // Some local builds can have stale generated typings for the Bluetooth SDK module.
+              ;(BluetoothSdk as any).logCurrentWifiFrequency?.()
             }
-          }
-          if (Platform.OS === "android") {
-            // Some local builds can have stale generated typings for the Bluetooth SDK module.
-            ;(BluetoothSdk as any).logCurrentWifiFrequency?.()
-          }
-          if (finalSSID && finalSSID !== hotspotInfo.ssid) {
-            console.error(
-              `[GallerySyncService] ❌ SSID mismatch detected! Expected "${hotspotInfo.ssid}", got "${finalSSID}"`,
-            )
-            throw new Error(`WiFi SSID mismatch - connected to "${finalSSID}" instead of "${hotspotInfo.ssid}"`)
+            if (finalSSID !== hotspotInfo.ssid) {
+              console.error(
+                `[GallerySyncService] ❌ SSID mismatch detected! Expected "${hotspotInfo.ssid}", got "${finalSSID}"`,
+              )
+              throw new Error(`WiFi SSID mismatch - connected to "${finalSSID}" instead of "${hotspotInfo.ssid}"`)
+            }
+          } catch (finalError: any) {
+            console.warn(`[GallerySyncService] ⚠️ Could not perform final SSID check: ${finalError?.message}`)
+            // Continue anyway - we've done our best to verify
           }
 
           // iOS-specific: Wait for actual network connectivity to glasses
@@ -1224,22 +1086,19 @@ class GallerySyncService {
             let networkReady = false
 
             for (let probeNum = 1; probeNum <= maxProbeAttempts; probeNum++) {
-              // Declared outside the try so the `finally` can always clear it — the fetch
-              // rejects on most early probes, and an un-cleared BgTimer is a live native
-              // timer (up to 20 per attempt, 100 per sync).
-              const probeController = new AbortController()
-              let probeTimeout: number | null = null
               try {
                 console.log(`[GallerySyncService] 🍎 Connectivity probe ${probeNum}/${maxProbeAttempts}...`)
 
                 // Try to reach the glasses health endpoint with a short timeout
-                probeTimeout = BgTimer.setTimeout(() => probeController.abort(), 1000) // 1 second timeout per probe
+                const probeController = new AbortController()
+                const probeTimeout = BgTimer.setTimeout(() => probeController.abort(), 1000) // 1 second timeout per probe
 
                 const probeStartTime = Date.now()
                 const probeResponse = await localNetworkTransport.fetch(`http://${hotspotInfo.ip}:8089/api/health`, {
                   method: "GET",
                   signal: probeController.signal,
                 })
+                BgTimer.clearTimeout(probeTimeout)
 
                 const probeDuration = Date.now() - probeStartTime
                 console.log(
@@ -1253,16 +1112,14 @@ class GallerySyncService {
                   networkReady = true
                   break
                 }
-              } catch (probeError: unknown) {
-                const errorMsg = probeError instanceof Error ? probeError.message : String(probeError)
+              } catch (probeError: any) {
+                const errorMsg = probeError?.message || "unknown"
                 console.log(
                   `[GallerySyncService] 🍎 Probe ${probeNum} failed: ${errorMsg.substring(0, 50)}${
                     errorMsg.length > 50 ? "..." : ""
                   }`,
                 )
                 // Continue to next probe
-              } finally {
-                if (probeTimeout !== null) BgTimer.clearTimeout(probeTimeout)
               }
 
               // Wait 500ms before next probe (unless this was the last attempt)
@@ -1431,12 +1288,6 @@ class GallerySyncService {
       } else if (lastError?.message?.includes("internal error")) {
         userErrorMessage =
           "Could not connect to glasses WiFi. Please ensure you accept the WiFi prompt when it appears."
-      } else if (!this.ssidReadable) {
-        // We fell back to the connectivity probe because Location was denied, and the probe
-        // did not reach the glasses either. Point the user at the actionable cause rather
-        // than a raw "could not reach 192.168.43.1:8089".
-        userErrorMessage = "Could not reach glasses over WiFi. Allow Location access so the app can verify the network."
-        emitGalleryNotice({code: "location_permission_required"})
       }
 
       store.setSyncError(userErrorMessage)
@@ -1555,11 +1406,6 @@ class GallerySyncService {
       // Set up the API client
       asgCameraApi.setServer(hotspotInfo.ip, 8089)
       console.log("[GallerySyncService]   ✅ API client configured")
-
-      // Wi-Fi is ready. Inventory/recovery can take time for large galleries and must
-      // render as preparation. Preserve the display queue until a new manifest is ready;
-      // setSyncing([]) would discard retained thumbnails and recovery progress on failure.
-      store.setSyncState("preparing")
 
       const recovery = await mediaProcessingQueue.retryPending()
       if (recovery.retried > 0 || recovery.failed > 0) {
@@ -2272,12 +2118,12 @@ class GallerySyncService {
       console.log("[GallerySyncService]   ℹ️ Hotspot was not opened by service - leaving it enabled")
     }
 
-    // Record a known empty gallery immediately after successful sync.
+    // Clear glasses gallery count immediately after successful sync
     // This ensures UI shows 0 items remaining right away
     // The subsequent query will update this if new photos were taken during sync
-    if (!hasPendingRecovery && failedCount === 0 && selectGlassesConnected(useGlassesStore.getState())) {
+    if (!hasPendingRecovery && failedCount === 0) {
       console.log("[GallerySyncService]   🔄 Clearing glasses gallery count (synced all items)")
-      store.setGlassesGalleryStatus(0, 0, 0, false)
+      store.clearGlassesGalleryStatus()
     }
 
     // Auto-reset to idle after 4 seconds to clear "Sync complete!" message,
@@ -2418,11 +2264,14 @@ class GallerySyncService {
   }
 
   /**
-   * Check if sync is currently in progress (hotspot/WiFi/preparation/download phases).
+   * Check if sync is currently in progress (hotspot/WiFi/download phases).
    * Does not include pre-flight — use isSyncStarting() for that.
    */
   isSyncing(): boolean {
-    return selectIssyncing(useGallerySyncStore.getState())
+    const store = useGallerySyncStore.getState()
+    return (
+      store.syncState === "syncing" || store.syncState === "connecting_wifi" || store.syncState === "requesting_hotspot"
+    )
   }
 }
 

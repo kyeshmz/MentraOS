@@ -7,7 +7,7 @@ import android.graphics.BitmapFactory
 import android.graphics.drawable.Drawable
 import android.os.Handler
 import android.os.Looper
-import com.mentra.bluetoothsdk.utils.NativeLog as Log
+import android.util.Log
 
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.Observer
@@ -703,8 +703,9 @@ class Mach1 : SGCManager() {
     }
 
     fun blankScreen() {
-        ultraliteSdk?.screenOff()
-        screenIsClear = true
+//        if (connectedGlasses != null){
+//            connectedGlasses.clear();
+//        }
     }
 
     fun destroy() {
@@ -780,12 +781,12 @@ class Mach1 : SGCManager() {
     }
 
     fun changeUltraliteLayout(chosenLayout: Layout) {
-        ultraliteSdk!!.screenOn()
-
         //don't update layout if it's already setup
         if (currentUltraliteLayout != null && currentUltraliteLayout == chosenLayout) {
             return
         }
+
+        ultraliteSdk!!.screenOn()
 
         currentUltraliteLayout = chosenLayout
         ultraliteSdk!!.setLayout(chosenLayout, 0, true, false, 2)
@@ -1127,7 +1128,7 @@ class Mach1 : SGCManager() {
                     override fun onBitmapFailed(e: Exception?, errorDrawable: Drawable?) {
                         // Handle the error
                         Log.d(TAG, "Bitmap failed")
-                        com.mentra.bluetoothsdk.utils.NativeLog.e("Mach1", "Native exception", e!!)
+                        e!!.printStackTrace()
                     }
 
                     override fun onPrepareLoad(placeHolderDrawable: Drawable?) {

@@ -25,8 +25,7 @@
 
 import {File} from "expo-file-system"
 
-import {isInstalledMiniappAllowed, isLocalMiniappPackageAllowed} from "../runtime/bootstrap"
-import {resolveDevBundleSource} from "../utils/devMiniappSnapshot"
+import {decideDevLaunchRoute} from "../utils/devMiniappLaunch"
 import {storage} from "../utils/storage/storage"
 import appRegistry, {getLocalAppRunningState, saveLocalAppRunningState} from "./AppRegistry"
 import devServerBridge from "./DevServerBridge"
@@ -97,89 +96,67 @@ class MiniappLauncher {
    * package. Handles both dev (HTTP off the running dev server) and released
    * (file:// from the installed snapshot). Reads disk/network/storage; does
    * NOT spawn. Returns null when the bundle can't be resolved (dev server
-   * unreachable with no on-disk snapshot, missing entry, no installed version).
+   * unreachable, missing entry, no installed version).
    */
   async resolveBundle(packageName: string, hints?: LaunchHints): Promise<ResolvedBundle | null> {
     const devUrl = hints?.devUrl ?? this.storedDevUrl(packageName)
 
-    // --- Dev: live HTTP, then the last on-disk snapshot if the laptop is gone. ---
+    // --- Dev: load directly off the local dev server over HTTP. ---
     if (devUrl) {
-      const source = await resolveDevBundleSource(packageName, devUrl)
-      if (source.kind === "live") {
-        const live = await this.resolveLiveHttp(packageName, source.resolvedUrl, source.manifest, hints)
-        if (live) return live
-        // Live probe succeeded but the entry fetch failed — still try disk.
+      const route = await decideDevLaunchRoute(packageName, devUrl)
+      if (route.decision === "offline" || !route.manifest) return null
+      const manifest = route.manifest
+      const entry = manifest.entry as {background?: string; ui?: string} | undefined
+      if (!entry?.background) return null
+
+      // Use the host that actually answered — may differ from the stored IP
+      // after a laptop Wi-Fi change (mDNS / Metro failover inside decideDevLaunchRoute).
+      const base = route.resolvedUrl.replace(/\/$/, "")
+      // entry.* are bundle-root paths (dist/ stripped); the dev server serves
+      // files relative to cwd, so prepend dist/.
+      const bgUrl = `${base}/dist/${entry.background.replace(/^\.?\/+/, "")}`
+      const uiUri = entry.ui ? `${base}/dist/${entry.ui.replace(/^\.?\/+/, "")}` : null
+
+      const perms = manifest.permissions as Array<{type?: string} | string> | undefined
+      const declaredPermissions = (perms ?? [])
+        .map((p) => (typeof p === "string" ? p : p?.type))
+        .filter((t): t is string => typeof t === "string")
+      const installedManifest: InstalledMiniappManifest = {
+        packageName: typeof manifest.packageName === "string" ? manifest.packageName : packageName,
+        name: manifest.name,
+        version: typeof manifest.version === "string" ? manifest.version : undefined,
+        sdkVersion: typeof manifest.sdkVersion === "string" ? manifest.sdkVersion : undefined,
+        minHostVersion: typeof manifest.minHostVersion === "string" ? manifest.minHostVersion : undefined,
+        type: typeof manifest.type === "string" ? manifest.type : undefined,
+        entry: manifest.entry as InstalledMiniappManifest["entry"],
+        permissions: manifest.permissions as InstalledMiniappManifest["permissions"],
+        hardwareRequirements: manifest.hardwareRequirements as InstalledMiniappManifest["hardwareRequirements"],
+        actions: manifest.actions as InstalledMiniappManifest["actions"],
       }
-      const snapshotVersion =
-        source.kind === "snapshot" ? source.version : appRegistry.getLatestDevSnapshotVersion(packageName)
-      if (snapshotVersion) {
-        const snapshot = await this.resolveInstalledBundle(packageName, snapshotVersion)
-        if (snapshot) return snapshot
+
+      let bgSource: string
+      try {
+        const res = await fetch(bgUrl)
+        if (!res.ok) return null
+        bgSource = await res.text()
+      } catch {
+        return null
       }
-      return null
+
+      return {
+        bgSource,
+        uiUri,
+        uiBaseDir: uiUri ? uiUri.replace(/\/[^/]+$/, "/") : null,
+        declaredPermissions,
+        installedManifest,
+        devUrl: route.resolvedUrl,
+        devPort: this.resolveDevPort(hints?.devPort, packageName),
+      }
     }
 
     // --- Released: resolve from the installed file:// snapshot. ---
     const version = hints?.version ?? (await appRegistry.getActiveVersion(packageName))
     if (!version) return null
-    return this.resolveInstalledBundle(packageName, version)
-  }
-
-  private async resolveLiveHttp(
-    packageName: string,
-    resolvedUrl: string,
-    manifest: {entry?: unknown; permissions?: unknown; [key: string]: unknown},
-    hints?: LaunchHints,
-  ): Promise<ResolvedBundle | null> {
-    const entry = manifest.entry as {background?: string; ui?: string} | undefined
-    if (!entry?.background) return null
-
-    // Use the host that actually answered — may differ from the stored IP
-    // after a laptop Wi-Fi change (mDNS / Metro failover inside resolveDevBundleSource).
-    const base = resolvedUrl.replace(/\/$/, "")
-    // entry.* are bundle-root paths (dist/ stripped); the dev server serves
-    // files relative to cwd, so prepend dist/.
-    const bgUrl = `${base}/dist/${entry.background.replace(/^\.?\/+/, "")}`
-    const uiUri = entry.ui ? `${base}/dist/${entry.ui.replace(/^\.?\/+/, "")}` : null
-
-    const perms = manifest.permissions as Array<{type?: string} | string> | undefined
-    const declaredPermissions = (perms ?? [])
-      .map((p) => (typeof p === "string" ? p : p?.type))
-      .filter((t): t is string => typeof t === "string")
-    const installedManifest: InstalledMiniappManifest = {
-      packageName: typeof manifest.packageName === "string" ? manifest.packageName : packageName,
-      name: typeof manifest.name === "string" ? manifest.name : undefined,
-      version: typeof manifest.version === "string" ? manifest.version : undefined,
-      sdkVersion: typeof manifest.sdkVersion === "string" ? manifest.sdkVersion : undefined,
-      minHostVersion: typeof manifest.minHostVersion === "string" ? manifest.minHostVersion : undefined,
-      type: typeof manifest.type === "string" ? manifest.type : undefined,
-      entry: manifest.entry as InstalledMiniappManifest["entry"],
-      permissions: manifest.permissions as InstalledMiniappManifest["permissions"],
-      hardwareRequirements: manifest.hardwareRequirements as InstalledMiniappManifest["hardwareRequirements"],
-      actions: manifest.actions as InstalledMiniappManifest["actions"],
-    }
-
-    let bgSource: string
-    try {
-      const res = await fetch(bgUrl)
-      if (!res.ok) return null
-      bgSource = await res.text()
-    } catch {
-      return null
-    }
-
-    return {
-      bgSource,
-      uiUri,
-      uiBaseDir: uiUri ? uiUri.replace(/\/[^/]+$/, "/") : null,
-      declaredPermissions,
-      installedManifest,
-      devUrl: resolvedUrl,
-      devPort: this.resolveDevPort(hints?.devPort, packageName),
-    }
-  }
-
-  private async resolveInstalledBundle(packageName: string, version: string): Promise<ResolvedBundle | null> {
     const entryPaths = appRegistry.getMiniappEntryPaths(packageName, version)
     if (!entryPaths?.background) return null
 
@@ -226,7 +203,6 @@ class MiniappLauncher {
       uiBaseDir: entryPaths.ui ? entryPaths.ui.replace(/\/[^/]+$/, "/") : null,
       declaredPermissions,
       installedManifest,
-      // Snapshot fallback is file:// — do not wire the sidecar; the laptop is gone.
       devUrl: null,
       devPort: null,
     }
@@ -244,9 +220,6 @@ class MiniappLauncher {
    * {@link LocalMiniappRuntime.waitForConnect}.
    */
   async ensureRunning(packageName: string, hints?: LaunchHints): Promise<LaunchResult> {
-    if (!isLocalMiniappPackageAllowed(packageName)) {
-      throw new Error(`MiniappLauncher: ${packageName} is disabled by deployment policy`)
-    }
     const router = this.requireRouter()
 
     // Already spawned: best-effort resolve for the UI entry, never throw —
@@ -276,16 +249,6 @@ class MiniappLauncher {
     const resolved = await this.resolveBundle(packageName, hints)
     if (!resolved) {
       throw new Error(`MiniappLauncher: cannot resolve bundle for ${packageName}`)
-    }
-    const version = resolved.installedManifest?.version
-    if (
-      !isInstalledMiniappAllowed(
-        packageName,
-        version,
-        version ? appRegistry.getReleaseIdentity(packageName, version) : null,
-      )
-    ) {
-      throw new Error(`MiniappLauncher: ${packageName} bundle is not authorized by deployment policy`)
     }
 
     // Re-check after the async resolve: a different path may have spawned it
@@ -317,9 +280,12 @@ class MiniappLauncher {
   /**
    * Re-spawn local miniapps that were running when the app was last killed.
    *
-   * Every miniapp runs as local JavaScript in the Mentra App on the phone.
-   * A host-process kill tears down its JSContext, so without this restoration
-   * it stays stopped on the next launch even though the user left it running.
+   * Cloud apps run on a remote server: the cloud persists which ones are
+   * running and resurrects them when the phone reconnects, so a host-app
+   * restart brings them back on its own. Local (phone-hosted) miniapps run in
+   * the phone's own JS engine — a host-process kill tears down their JSContext
+   * and there is no server to resurrect them, so without this they silently
+   * stay stopped on the next launch even though the user left them running.
    *
    * Each local miniapp persists its running flag to disk on start/stop
    * (`saveLocalAppRunningState`, via the applet's `onStart`/`onStop`). We read
@@ -328,9 +294,9 @@ class MiniappLauncher {
    * tray/switcher project it as running, exactly as a normal start would. The
    * WebView, if any, re-attaches lazily when the user opens the app.
    *
-   * Idempotent and best-effort: skips already-spawned contexts and clears the
-   * persisted running flag if ensureRunning fails (for example, bundle resolution,
-   * deployment policy, or context spawning) so it does not retry every boot.
+   * Idempotent and best-effort: skips already-spawned contexts, and clears the
+   * persisted flag for any app whose bundle can no longer be resolved
+   * (uninstalled, or dev server gone) so a dead entry doesn't retry every boot.
    * Not compatibility-gated: a previously-running background app shouldn't be
    * dropped just because glasses are momentarily disconnected at boot — it
    * resumes when they reconnect, same as mid-session.
